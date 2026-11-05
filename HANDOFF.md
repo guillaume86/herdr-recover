@@ -58,7 +58,7 @@ PowerShell starts and stays.
    `RECOVER_SOURCE=$PWD sh install.sh` and `sh install.sh --doctor`.
 2. Open `%APPDATA%\herdr-core\config.toml`. Expect a `# herdr-recover was:` line if a
    `shell` existed, and
-   `shell = ["pwsh.exe", "-NoLogo", "-NoExit", "-Command", "if ($env:HC_TERMINAL_ID) { try { Start-Process -WindowStyle Hidden -FilePath 'C:/Program Files/Git/bin/sh.exe' -ArgumentList ('\"C:/Users/<you>/.local/bin/herdr-recover-shell\" --job {0} {1} pwsh \"<hc path>\"' -f $env:HC_TERMINAL_ID, $PID) } catch {} }"]  # herdr-recover`.
+   `shell = ["pwsh.exe", "-NoExit", "-Command", "<hc's own prompt, as in hc's default entry>; if ($env:HC_TERMINAL_ID) { try { Start-Process -WindowStyle Hidden -FilePath 'C:/Program Files/Git/bin/sh.exe' -ArgumentList ('\"C:/Users/<you>/.local/bin/herdr-recover-shell\" --job {0} {1} pwsh \"<hc path>\"' -f $env:HC_TERMINAL_ID, $PID) } catch {} }"]  # herdr-recover`.
    Check the paths it filled in exist (sh.exe under Git's **bin**, the launcher that sets
    up PATH for /usr/bin tools; `hc` resolved by `command -v hc`).
 3. Open a new terminal in the Herdr app. Expect: PowerShell starts as before (profile

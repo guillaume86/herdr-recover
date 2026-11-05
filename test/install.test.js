@@ -9,6 +9,11 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const installer = join(dirname(fileURLToPath(import.meta.url)), "..", "install.sh");
+// hc 0.1.18's default PowerShell -Command on Windows (`hc get <t> --json` of a terminal started
+// with no `shell` configured): it keeps [Environment]::CurrentDirectory on PowerShell's folder.
+const HC_PROMPT = "$global:__hc_prompt = $function:prompt; function global:prompt { $p = & $global:__hc_prompt; " +
+  "$l = $ExecutionContext.SessionState.Path.CurrentLocation; if ($l.Provider.Name -eq 'FileSystem') " +
+  "{ try { [Environment]::CurrentDirectory = $l.ProviderPath } catch {} }; $p }";
 const hasToml = spawnSync("python3", ["-c", "import tomllib"]).status === 0;
 
 function home({ opencode = null } = {}) {
@@ -103,7 +108,7 @@ test("herdr-core on Windows: PowerShell starts the job through Git Bash", () => 
     tool("pwsh.exe", "exit 0");
     tool("cygpath", `case "$1" in
   -u) printf '%s\\n' "$2" | sed 's#\\\\#/#g; s#^C:#${c}#' ;;
-  -m) case "$2" in /) echo "C:/Program Files/Git" ;; ${c}/*) printf '%s\\n' "$2" | sed 's#^${c}#C:#' ;; *) printf 'C:/msys%s\\n' "$2" ;; esac ;;
+  -m) case "$2" in /) echo "C:/Program Files/Git/" ;; ${c}/*) printf '%s\\n' "$2" | sed 's#^${c}#C:#' ;; *) printf 'C:/msys%s\\n' "$2" ;; esac ;;
 esac`);
     const env = { PATH: `${bin}:/usr/bin:/bin`, HOME: join(c, "Users", "Jo O'Neil"), APPDATA: "C:\\Users\\Jo O'Neil\\AppData\\Roaming" };
     const out = spawnSync("sh", [installer], { env }).stdout.toString();
@@ -113,8 +118,12 @@ esac`);
     if (!hasToml) return;
     const [exe, ...args] = toml(cfg).shell;
     assert.equal(exe, "pwsh.exe");
-    assert.deepEqual(args.slice(0, 3), ["-NoLogo", "-NoExit", "-Command"]);
-    assert.equal(args[3], "if ($env:HC_TERMINAL_ID) { try { Start-Process -WindowStyle Hidden -FilePath 'C:/Program Files/Git/bin/sh.exe' " +
+    // hc's own entry (pwsh.exe -NoExit -Command <its prompt>), which keeps the terminal's folder
+    // known to hc, then the job; `cygpath -m /`'s trailing slash doesn't double the one after it.
+    assert.deepEqual(args.slice(0, 2), ["-NoExit", "-Command"]);
+    assert.equal(args.length, 3);
+    assert.equal(args[2], HC_PROMPT + "; " +
+      "if ($env:HC_TERMINAL_ID) { try { Start-Process -WindowStyle Hidden -FilePath 'C:/Program Files/Git/bin/sh.exe' " +
       `-ArgumentList ('"C:/Users/Jo O''Neil/.local/bin/herdr-recover-shell" --job {0} {1} pwsh "C:/msys${bin}/hc"' -f $env:HC_TERMINAL_ID, $PID) } catch {} }`);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
@@ -178,6 +187,20 @@ test("opencode 2: once OpenCode 2 has run, OpenCode 1's leftovers don't hold cli
     writeFileSync(join(oc, "service.json"), "{}\n");
     h.sh();
     assert.equal(h.read(join(oc, "cli.json")), '{\n  "plugins": ["./herdr-recover"]\n}\n');
+  } finally { h.done(); }
+});
+
+test("opencode: a config folder with only another tool's plugin isn't OpenCode", () => {
+  const h = home();
+  try {
+    const plugins = join(h.dir, "config", "opencode", "plugins");
+    mkdirSync(plugins, { recursive: true });
+    writeFileSync(join(plugins, "paseo-terminal-activity.js"), "// another tool's\n");
+    const out = h.sh();
+    assert.doesNotMatch(out, /OpenCode:/, out);
+    assert.match(out, /No supported agent found here/);
+    assert.ok(!existsSync(join(plugins, "herdr-recover.js")));
+    assert.doesNotMatch(h.sh("--doctor"), /OpenCode/);
   } finally { h.done(); }
 });
 

@@ -182,9 +182,10 @@ On the computer that runs the Herdr app: delete `~/.config/herdr-app/mods/recove
      as a sender with no terminal of its own, so hc types it as it is.
 
    It finds hc from the process that started it (hc's own holder), since the core's PATH
-   is often bare. On Windows, the configured shell is PowerShell with `-NoExit -Command`:
-   the command starts `sh.exe herdr-recover-shell --job <terminal> <pid> pwsh <hc>` hidden,
-   then PowerShell carries on as your shell.
+   is often bare. On Windows, the configured shell is hc's own PowerShell entry
+   (`-NoExit -Command` with hc's prompt, which keeps hc told the folder PowerShell is in) plus
+   one more command: it starts `sh.exe herdr-recover-shell --job <terminal> <pid> pwsh <hc>`
+   hidden, then PowerShell carries on as your shell.
 3. **The mod** (optional, `mods/recover/main.js`) runs in the app's status bar and dialog
    and lists every terminal carrying `recover.session`, on every machine: Running, Lost to
    a restart (until its new shell resumes it), Resume failed (the agent didn't come up

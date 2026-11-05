@@ -54,6 +54,10 @@ core_config() {
   else printf '%s/herdr-core/config.toml' "${XDG_CONFIG_HOME:-$HOME/.config}"; fi
 }
 toml() { printf '"%s"' "$(printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g')"; }
+# hc 0.1.18's default PowerShell -Command, word for word: keeps [Environment]::CurrentDirectory,
+# which hc reads as the terminal's folder, on the folder PowerShell is in.
+# shellcheck disable=SC2016
+hc_prompt='$global:__hc_prompt = $function:prompt; function global:prompt { $p = & $global:__hc_prompt; $l = $ExecutionContext.SessionState.Path.CurrentLocation; if ($l.Provider.Name -eq '"'FileSystem'"') { try { [Environment]::CurrentDirectory = $l.ProviderPath } catch {} }; $p }'
 # A PowerShell literal, and the same inside a -f format string.
 ps_literal() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/''/g")"; }
 ps_format() { printf '%s' "$1" | sed "s/'/''/g; s/{/{{/g; s/}/}}/g"; }
@@ -76,13 +80,17 @@ core_line() {
     esac
   elif has pwsh.exe; then exe=pwsh.exe
   else exe=powershell.exe; fi
-  sh_exe="$(cygpath -m /)/bin/sh.exe"
+  # `cygpath -m /` ends in a slash.
+  git_root=$(cygpath -m /)
+  sh_exe="${git_root%/}/bin/sh.exe"
   [ -f "$(cygpath -u "$sh_exe")" ] || { step "  skipped: Git Bash's sh.exe isn't at $sh_exe."; return 1; }
   hc_exe=$(cygpath -m "$(command -v hc)")
   # The paths escaped for the format string, not its {0} and {1}.
   args="\"$(ps_format "$(cygpath -m "$script")")\" --job {0} {1} pwsh \"$(ps_format "$hc_exe")\""
   stub="if (\$env:HC_TERMINAL_ID) { try { Start-Process -WindowStyle Hidden -FilePath $(ps_literal "$sh_exe") -ArgumentList ('$args' -f \$env:HC_TERMINAL_ID, \$PID) } catch {} }"
-  printf 'shell = [%s, "-NoLogo", "-NoExit", "-Command", %s]' "$(toml "$exe")" "$(toml "$stub")"
+  # hc's own PowerShell entry, which a configured `shell` replaces: its prompt tells Windows the
+  # folder PowerShell is in, which is how hc (and the Herdr app) know a terminal's folder.
+  printf 'shell = [%s, "-NoExit", "-Command", %s]' "$(toml "$exe")" "$(toml "$hc_prompt; $stub")"
 }
 
 # Rewrites the config in one move (the core reads it live): $1 = file, $2 = our line ("" to
@@ -157,6 +165,16 @@ install_codex() {
   else step "  failed: run the commands above to see why."; fi
 }
 
+# OpenCode is here: its command, or its own settings (or Recover's part) in its config folder. A
+# folder alone isn't OpenCode: other tools leave plugins there (Paseo does, on Windows too).
+opencode_here() {
+  has opencode && return 0
+  for f in opencode.json opencode.jsonc cli.json tui.json tui.jsonc service.json "plugins/$name.js" "$name/tui.js"; do
+    [ -f "$opencode_dir/$f" ] && return 0
+  done
+  return 1
+}
+
 # OpenCode's major version: from the command, else from its config (cli.json is OpenCode 2's).
 opencode_major() {
   v=$(opencode --version 2>/dev/null | sed -n 's/^[^0-9]*\([0-9][0-9]*\).*/\1/p' | head -1)
@@ -200,7 +218,7 @@ unregister_opencode() {
 }
 
 install_opencode() {
-  has opencode || [ -d "$opencode_dir" ] || return 0
+  opencode_here || return 0
   step "OpenCode:"
   if [ "$(opencode_major)" -ge 2 ]; then
     # OpenCode 1's plugin file would load in OpenCode 2's shared background service, which has
@@ -235,7 +253,7 @@ doctor() {
     legacy && step "  (and hooks of an earlier install in settings.json)"
   fi
   has codex && { grep -qs "$name" "${CODEX_HOME:-$HOME/.codex}/config.toml" && step "Codex: plugin installed" || step "Codex: not set up"; }
-  if has opencode || [ -d "$opencode_dir" ]; then
+  if opencode_here; then
     if [ "$(opencode_major)" -ge 2 ]; then
       if [ -f "$opencode_dir/$name/tui.js" ] && grep -qsF "\"./$name\"" "$opencode_dir/cli.json"; then step "OpenCode: TUI plugin installed"
       else step "OpenCode: not set up"; fi
@@ -252,7 +270,7 @@ case "$mode" in
   install)
     has hc || step "hc isn't on PATH here; Recover needs it (set RECOVER_HC or fix PATH)." >&2
     install_core; install_claude; install_codex; install_opencode; install_pi
-    has claude || has codex || has opencode || has pi || [ -d "$opencode_dir" ] || step "No supported agent found here (Claude Code, Codex, OpenCode, Pi)."
+    has claude || has codex || opencode_here || has pi || step "No supported agent found here (Claude Code, Codex, OpenCode, Pi)."
     ;;
   --uninstall | uninstall)
     uninstall_core
