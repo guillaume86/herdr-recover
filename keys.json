@@ -1,0 +1,5 @@
+{
+  "global": {
+    "ctrl-shift-r": "mod.open:recover"
+  }
+}

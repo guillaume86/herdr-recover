@@ -1,0 +1,12 @@
+{
+  "name": "herdr-recover",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Bring back the coding agent a Herdr terminal lost to a restart or a reboot, on this computer and on your other machines, from the Herdr app.",
+  "license": "MIT",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "test": "node --test test/*.test.js && sh test/hook.test.sh"
+  }
+}
