@@ -41,7 +41,7 @@ test("herdr-core: a fresh config gets the shell, and uninstall takes it out", ()
   const h = home();
   try {
     assert.match(h.sh(), /herdr-core:\n {2}installed/);
-    const script = join(h.dir, "data", "herdr-recover", "recover-shell.sh");
+    const script = join(h.dir, ".local", "bin", "herdr-recover-shell");
     assert.ok(existsSync(script));
     if (hasToml) assert.deepEqual(toml(h.cfg).shell, [script]);
     assert.match(h.sh("--doctor"), /herdr-core: shell set up/);
@@ -61,7 +61,7 @@ test("herdr-core: a shell already set is run by Recover's, and given back", () =
     h.sh();
     if (hasToml) {
       const parsed = toml(h.cfg);
-      assert.deepEqual(parsed.shell, [join(h.dir, "data", "herdr-recover", "recover-shell.sh"), "nu", "--login"]);
+      assert.deepEqual(parsed.shell, [join(h.dir, ".local", "bin", "herdr-recover-shell"), "nu", "--login"]);
       assert.equal(parsed.notes, false);
       assert.deepEqual(parsed.ssh, { x: 1 });
     }
@@ -109,13 +109,13 @@ esac`);
     const out = spawnSync("sh", [installer], { env }).stdout.toString();
     assert.match(out, /herdr-core:\n {2}installed/, out);
     const cfg = join(c, "Users", "Jo O'Neil", "AppData", "Roaming", "herdr-core", "config.toml");
-    assert.ok(existsSync(join(c, "Users", "Jo O'Neil", ".local", "share", "herdr-recover", "recover-shell.sh")));
+    assert.ok(existsSync(join(c, "Users", "Jo O'Neil", ".local", "bin", "herdr-recover-shell")));
     if (!hasToml) return;
     const [exe, ...args] = toml(cfg).shell;
     assert.equal(exe, "pwsh.exe");
     assert.deepEqual(args.slice(0, 3), ["-NoLogo", "-NoExit", "-Command"]);
     assert.equal(args[3], "if ($env:HC_TERMINAL_ID) { try { Start-Process -WindowStyle Hidden -FilePath 'C:/Program Files/Git/bin/sh.exe' " +
-      `-ArgumentList ('"C:/Users/Jo O''Neil/.local/share/herdr-recover/recover-shell.sh" --job {0} {1} pwsh "C:/msys${bin}/hc"' -f $env:HC_TERMINAL_ID, $PID) } catch {} }`);
+      `-ArgumentList ('"C:/Users/Jo O''Neil/.local/bin/herdr-recover-shell" --job {0} {1} pwsh "C:/msys${bin}/hc"' -f $env:HC_TERMINAL_ID, $PID) } catch {} }`);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 

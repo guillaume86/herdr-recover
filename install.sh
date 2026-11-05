@@ -9,7 +9,7 @@
 # server (on Windows, from Git Bash). The Herdr app isn't needed there, only hc. Two parts:
 #
 #   herdr-core   its `shell` (config.toml) becomes hook/recover-shell.sh, copied to
-#                ~/.local/share/herdr-recover: in a kept terminal's new shell, after a reboot
+#                ~/.local/bin/herdr-recover-shell: in a kept terminal's new shell, after a reboot
 #                or a core stop, it types the line that resumes the session. On Windows,
 #                PowerShell starts it through Git Bash. A `shell` you had is kept, and put
 #                back by --uninstall.
@@ -34,7 +34,8 @@ source="${RECOVER_SOURCE:-}"
 opencode_dir="${OPENCODE_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/opencode}"
 opencode_state="${XDG_STATE_HOME:-$HOME/.local/state}/opencode"
 pi_dir="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}"
-share="${XDG_DATA_HOME:-$HOME/.local/share}/$name"
+# Out of any clone: every terminal starts through it, so it must outlive the one it came from.
+shell_bin="${XDG_BIN_HOME:-$HOME/.local/bin}/$name-shell"
 mark="# $name"
 case "$(uname -s)" in MINGW* | MSYS* | CYGWIN*) windows=1 ;; *) windows= ;; esac
 
@@ -62,7 +63,7 @@ ps_format() { printf '%s' "$1" | sed "s/'/''/g; s/{/{{/g; s/}/}}/g"; }
 core_line() {
   inner=
   if [ -n "$1" ]; then inner=${1#*[}; inner=${inner%]*}; fi
-  script="$share/recover-shell.sh"
+  script=$shell_bin
   if [ -z "$windows" ]; then
     printf 'shell = [%s%s]' "$(toml "$script")" "${inner:+, $(printf '%s' "$inner" | sed 's/^[[:space:]]*//')}"
     return 0
@@ -114,10 +115,10 @@ install_core() {
   was=$(core_was "$cfg")
   case $was in "" | *\]*) ;; *) step "  skipped: $cfg sets \`shell\` over several lines; put it on one and run install.sh again."; return 0 ;; esac
   line=$(core_line "$was") || { printf '%s\n' "$line"; return 0; }
-  mkdir -p "$share" && cp "$here/hook/recover-shell.sh" "$share/recover-shell.sh" && chmod +x "$share/recover-shell.sh" \
-    || { step "  failed to copy recover-shell.sh to $share"; return 0; }
+  mkdir -p "$(dirname "$shell_bin")" && cp "$here/hook/recover-shell.sh" "$shell_bin" && chmod +x "$shell_bin" \
+    || { step "  failed to copy recover-shell.sh to $shell_bin"; return 0; }
   if write_core "$cfg" "$line" "$was"; then
-    step "  installed: $cfg runs $share/recover-shell.sh. New terminals and the shells of lost ones use it from now on, with no restart."
+    step "  installed: $cfg runs $shell_bin. New terminals and the shells of lost ones use it from now on, with no restart."
   else step "  failed to write $cfg"; fi
 }
 
@@ -128,7 +129,7 @@ uninstall_core() {
     write_core "$cfg" "" "$(sed -n "s/^$mark was: //p" "$cfg" | head -1)" && step "  removed Recover's shell from $cfg"
   fi
   # After the config: a configured shell that is missing is a terminal that can't open.
-  rm -f "$share/recover-shell.sh"; rmdir "$share" 2>/dev/null
+  rm -f "$shell_bin"
   return 0
 }
 
@@ -226,8 +227,8 @@ doctor() {
   printf 'hc: %s\n' "$(command -v hc 2>/dev/null || echo 'not on PATH (the hooks need it)')"
   cfg=$(core_config)
   if grep -qsF "$mark" "$cfg"; then
-    if [ -f "$share/recover-shell.sh" ]; then step "herdr-core: shell set up ($cfg)"
-    else step "herdr-core: $cfg runs $share/recover-shell.sh, which is missing: new terminals can't start. Run install.sh again."; fi
+    if [ -f "$shell_bin" ]; then step "herdr-core: shell set up ($cfg)"
+    else step "herdr-core: $cfg runs $shell_bin, which is missing: new terminals can't start. Run install.sh again."; fi
   else step "herdr-core: not set up (lost terminals come back as plain shells)"; fi
   if has claude; then
     claude plugin list 2>/dev/null | grep -q "$name" && step "Claude Code: plugin installed" || step "Claude Code: not set up"

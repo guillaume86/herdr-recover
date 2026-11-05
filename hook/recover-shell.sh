@@ -191,7 +191,7 @@ fi
 [ $# -gt 0 ] || set -- "${SHELL:-/bin/sh}"
 # A shell that isn't there (or this script, given as its own shell) would be a terminal that
 # can't open, retried forever: fall back to sh.
-case $1 in */recover-shell.sh | recover-shell.sh) set -- /bin/sh ;; esac
+case $1 in */recover-shell.sh | recover-shell.sh | */herdr-recover-shell | herdr-recover-shell) set -- /bin/sh ;; esac
 command -v "$1" >/dev/null 2>&1 || set -- /bin/sh
 if [ -n "${HC_TERMINAL_ID:-}" ] && find_hc; then
   job "$HC_TERMINAL_ID" $$ "$(shell_kind "$1")" </dev/null >/dev/null 2>&1 &
