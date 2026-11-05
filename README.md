@@ -10,7 +10,10 @@ agent that ran there is gone. Recover remembers which session each terminal held
 when the terminal comes back as a new shell, types the command that resumes it, with the
 same flags.
 
-Status: **v0.1, Claude Code only, not yet tried through a real reboot.** See [Limits](#limits).
+Status: **v0.1, Claude Code only.** Tested end to end on Windows + WSL: a WSL terminal whose
+shell was killed (a real hc loss and recovery) came back on its conversation with its
+flags, and on Windows a fresh PowerShell carrying a lost session got it back. Not yet
+tried through a full reboot. See [Limits](#limits).
 
 ## How it differs from Revive
 
@@ -80,19 +83,29 @@ Sessions already running are remembered from their next start (or `/resume`).
    (`recover.shell`). It skips sessions that aren't interactive (a `claude -p` an agent
    runs as a tool inherits `HC_TERMINAL_ID`) and sub-agents. At `SessionEnd`, `/exit`,
    Ctrl+C and `/logout` forget the session; a signal (`other`) keeps it; `/clear` and
-   `/resume` leave it to the next `SessionStart`.
+   `/resume` leave it to the next `SessionStart`. The `SessionStart` hook is installed
+   with `"async": true`, so Claude doesn't wait for it: under Git Bash every process
+   start can cost hundreds of milliseconds, so the hook parses JSON with one `sed` per
+   document and otherwise uses shell builtins.
 2. **The mod** (`mods/recover/main.js`) runs in the app's status bar (and in its dialog).
    Every 5 seconds it looks at every terminal the app sees, on every machine, that carries
    `recover.session`:
-   - **Running**: the agent is the terminal's foreground (Linux, macOS), or its session
-     file still names the session (everywhere; on Windows hc never sees a child program).
    - **Lost**: the terminal's program is no longer the one recorded: a new shell after a
-     restart. Once that shell has been there a whole tick, the mod types the resume line
-     into it with `hc send` (`cd -- '<folder>' && claude … --resume <id>` in sh shells,
+     restart. Whatever files the old agent left, it can't be running in the new shell.
+     Once that shell has been there a whole tick, the mod types the resume line into it
+     with `hc send` (`cd -- '<folder>' && claude … --resume <id>` in sh shells,
      `Set-Location -LiteralPath '<folder>'; & 'claude' … '--resume' '<id>'` in
-     PowerShell), marking the terminal first so no other copy sends it twice.
-   - **Resume failed**: the agent didn't come up within 15 seconds of a resume. A toast
-     says so; the dialog offers a retry. A failed session is not tried again by itself.
+     PowerShell), marking the terminal first so no other copy sends it twice. For a
+     terminal on another machine, `hc send` runs on that machine (`exec … { on }`): sent
+     from here, hc would wrap the line as a note from another machine
+     (`<hc from="…">…</hc>`) when the terminal ever reported agent status.
+   - **Running**: the agent is the terminal's foreground (Linux, macOS). In a Windows
+     shell, hc never sees a child program, so there the agent's session file
+     (`sessions/<pid>.json`, which the hook names) must name the session *and* its pid
+     must be a running `claude.exe` (`tasklist`): a killed agent leaves its file behind.
+   - **Resume failed**: the agent didn't come up within 60 seconds of a resume. A toast
+     says so; the dialog offers a retry. A failed session is not tried again by itself;
+     if it comes up late after all, the mark goes.
    - **Interrupted**: the agent died but its shell lived on (a crash). Not resumed by
      itself (you were there); the dialog offers Resume and Forget.
 3. **The dialog** (`ctrl-shift-r`) lists the focused terminal's session, the ones that need
@@ -107,10 +120,14 @@ go away with the terminal. `hc get t3 --json` shows them.
 - **Claude Code only** for now. The agent table (`AGENTS` in `lib/core.js`, with the
   flag allowlist from herdr-revive) is built to take Codex and others, but each needs its
   hook and its "is it running" signal.
-- **Not yet tried through a real reboot or `wsl --shutdown`.** The rules are unit-tested
-  (`npm test`) and the hook is tested against a fake `hc` in Git Bash and in WSL's dash,
-  but the end-to-end path (core recovery → the mod sees the new shell → types the line) is
-  untested.
+- **Not yet tried through a full reboot or `wsl --shutdown`**, only through single-terminal
+  losses (see Status). hc's holder is shared by every terminal on a machine, so a real
+  multi-terminal recovery needs a core restart.
+- **Resume in a shell whose agent crashed** (Interrupted, the dialog's Resume) can type
+  garbage: the dead agent leaves its terminal modes on (bracketed paste, the kitty
+  keyboard), and PowerShell's line editor reads the paste markers as keys. After a
+  restart the shell is fresh and this doesn't happen. Until it's fixed, type the resume
+  command yourself there, or open a new tab.
 - Typing into a shell that is still reading its profile relies on the terminal keeping the
   input, as the Herdr TUI did. A prompt that discards typed-ahead input (zsh instant prompt
   with some settings) can lose the line; the mod then reports "Resume failed".

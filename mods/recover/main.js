@@ -14,9 +14,10 @@
 
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { hc, exec, run, theme, terminals, focused, home, props, closeOverlay, notify, shared, setShared, window as appWindow, readTextFile } from "herdr";
+import { hc, exec, run, theme, terminals, focused, home, props, closeOverlay, notify, shared, setShared, window as appWindow, readTextFile, machines } from "herdr";
 import {
   AGENTS, PREFIX, agentOf, agentForApp, carriedFlags, readRecord, labelArgs, clearArgs, stateOf, decide, resumeLine, shellKind,
+  isWindowsShell, parseTasklist,
   parseSessionFiles, winArgv, shortId, ago, splitAddress, psQuote,
 } from "./lib/core.js";
 
@@ -65,6 +66,14 @@ async function sessionsOn(on, dirs) {
   return r.code === 0 || r.stdout ? parseSessionFiles(r.stdout) : null;
 }
 
+/** The pids of the agent processes running on a Windows machine (one tasklist, cheaper than PowerShell). */
+async function runningAgents(on) {
+  try {
+    const r = await exec("tasklist", ["/FO", "CSV", "/NH", "/FI", "IMAGENAME eq claude.exe"], { on });
+    return parseTasklist(r.stdout);
+  } catch { return new Set(); }
+}
+
 /** The command line of a Windows process, for the flags the hook couldn't read there. */
 async function winCommandLine(pid) {
   try {
@@ -94,23 +103,27 @@ async function scan({ setup = false } = {}) {
   try {
     const all = terminals().filter((t) => t.state === "live" && t.labels?.[`${PREFIX}session`]);
     const infos = (await Promise.all(all.map((t) => getTerminal(t.address).catch(() => null)))).filter(Boolean);
-    // Whether each session's agent runs: its own session file says so. The hook names the
-    // file; for a record without one, the machine's session files are listed once.
-    const fileLive = new Map(await Promise.all(infos.map(async (t) => {
+    // Where hc sees the program in front (Linux, macOS), that alone says whether the agent runs.
+    // In a Windows shell it never does: there the agent's session file must name the session
+    // (the hook records which file) and its pid must be a running agent. A killed agent leaves
+    // its file behind, so the file alone proves nothing. Only terminals still on the shell the
+    // session ran under are asked: in a new shell the agent is gone whatever the files say.
+    const asked = infos.filter((t) => {
       const rec = readRecord(t.labels);
-      if (!rec?.file) return [t.address, null];
-      const text = await readTextFile(rec.file, { on: splitAddress(t.address).on }).catch(() => null);
-      return [t.address, Boolean(text && parseSessionFiles(text).some((s) => s.session === rec.session))];
+      return rec && isWindowsShell(t.argv ?? []) && (rec.shell === null || rec.shell === t.pid);
+    });
+    const winFile = new Map(await Promise.all(asked.map(async (t) => {
+      const rec = readRecord(t.labels);
+      const on = splitAddress(t.address).on;
+      if (rec.file) {
+        const text = await readTextFile(rec.file, { on }).catch(() => null);
+        return [t.address, parseSessionFiles(text).find((s) => s.session === rec.session) ?? null];
+      }
+      // A record without its file (an older hook): the machine's session files, listed.
+      return [t.address, (await sessionsOn(on, rec.dir ? [rec.dir] : []))?.find((s) => s.session === rec.session) ?? null];
     })));
-    const byMachine = new Map();
-    for (const t of infos) {
-      if (fileLive.get(t.address) !== null) continue;
-      const { on } = splitAddress(t.address);
-      if (!byMachine.has(on)) byMachine.set(on, []);
-      const dir = readRecord(t.labels)?.dir;
-      if (dir) byMachine.get(on).push(dir);
-    }
-    const sessions = new Map(await Promise.all([...byMachine].map(async ([on, dirs]) => [on, await sessionsOn(on, dirs)])));
+    const machinesAsked = [...new Set(asked.map((t) => splitAddress(t.address).on))];
+    const agentPids = new Map(await Promise.all(machinesAsked.map(async (on) => [on, await runningAgents(on)])));
     const now = Date.now();
     const entries = [];
     const seenPid = {};
@@ -118,15 +131,20 @@ async function scan({ setup = false } = {}) {
       const rec = readRecord(t.labels);
       if (!rec) continue;
       const { on, id } = splitAddress(t.address);
-      const file = sessions.get(on)?.find((s) => s.session === rec.session) ?? null;
       const fg = t.foreground;
-      // Live by the terminal's foreground (Linux, macOS), or by the agent's own session file (everywhere).
-      const byFile = fileLive.get(t.address) ?? Boolean(file);
-      const live = (fg && fg.pid !== t.pid && agentOf(fg.argv ?? [fg.name]) === rec.agent) || byFile;
+      const file = winFile.get(t.address) ?? null;
+      const live = isWindowsShell(t.argv ?? [])
+        ? Boolean(file?.pid && agentPids.get(on)?.has(file.pid))
+        : Boolean(fg && fg.pid !== t.pid && agentOf(fg.argv ?? [fg.name]) === rec.agent);
       const pid = t.pid ?? null;
       const state = stateOf(rec, { live, pid });
       seenPid[t.address] = pid;
       if (live) m.live[t.address] = now;
+      // It came up after all (a slow start marked failed): the mark goes, without waiting for the hook.
+      if (live && rec.failed && rec.shell === pid) {
+        await hc(["label", t.address, ...labelArgs({ failed: null })]).catch(() => null);
+        rec.failed = null;
+      }
       const entry = {
         address: t.address, on, id, rec, state, pid, live,
         where: t.labels?.where ?? null, title: t.title ?? "",
@@ -163,8 +181,11 @@ async function scan({ setup = false } = {}) {
     m.entries = entries;
     m.at = now;
     if (setup) {
-      const machines = [...new Set([null, ...infos.map((t) => splitAddress(t.address).on)])];
-      m.hooks = Object.fromEntries(await Promise.all(machines.map(async (on) => [on ?? "", await hookInstalled(on)])));
+      // This computer and every machine the app reaches now, plus any a record is on.
+      let reachable = [];
+      try { reachable = machines().filter((x) => x.name && x.layout !== "unavailable").map((x) => x.name); } catch { /* none */ }
+      const places = [...new Set([null, ...reachable, ...infos.map((t) => splitAddress(t.address).on)])];
+      m.hooks = Object.fromEntries(await Promise.all(places.map(async (on) => [on ?? "", await hookInstalled(on)])));
     }
   } finally {
     m.busy = 0;
@@ -184,7 +205,11 @@ async function resume(entry, { auto = false } = {}) {
   if (!current || current.session !== rec.session || fresh.pid !== pid) return false;
   if (auto && current.resumed && current.shell === pid && now - current.resumed < 60_000) return false;
   await hc(["label", address, ...labelArgs({ shell: pid, resumed: now, failed: null })]);
-  const r = await hc(["send", address, line]);
+  // Sent from the terminal's own machine. From here, a send to a terminal that ever reported
+  // agent status (it stays latched after the agent dies) is wrapped as a note from another
+  // machine, `<hc from="…/ppid:…">line</hc>`, which the shell can't run. A local sender with
+  // no terminal of its own is no agent, so its text is typed as it is.
+  const r = entry.on ? await exec("hc", ["send", entry.id, line], { on: entry.on }) : await hc(["send", address, line]);
   if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim() || `hc send ${address} failed`);
   return true;
 }

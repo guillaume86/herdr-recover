@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   agentOf, agentForApp, carriedFlags, readRecord, labelArgs, clearArgs, stateOf, decide,
-  resumeLine, shellKind, parseSessionFiles, winArgv, splitAddress, validId, KEYS,
+  resumeLine, shellKind, parseSessionFiles, winArgv, splitAddress, validId, KEYS, isWindowsShell, parseTasklist,
 } from "../mods/recover/lib/core.js";
 
 const ID = "03f81d7c-f3fb-4095-b4fa-845fe178921c";
@@ -51,8 +51,10 @@ test("clearing removes every label but the person's auto choice", () => {
 });
 
 test("state: running, lost to a new shell, interrupted under the same one, failed", () => {
-  assert.equal(stateOf(rec(), { live: true, pid: 999 }), "running");
+  assert.equal(stateOf(rec(), { live: true, pid: 100 }), "running");
   assert.equal(stateOf(rec(), { live: false, pid: 999 }), "lost");
+  // A killed agent's session file outlives it: in a new shell it is lost, whatever looks live.
+  assert.equal(stateOf(rec(), { live: true, pid: 999 }), "lost");
   assert.equal(stateOf(rec(), { live: false, pid: 100 }), "interrupted");
   assert.equal(stateOf(rec({ failed: 5 }), { live: false, pid: 100 }), "failed");
   assert.equal(stateOf(rec({ failed: 5 }), { live: false, pid: 999 }), "failed");
@@ -70,9 +72,10 @@ test("decide: a loss is resumed unless auto is off; nothing else is typed by its
 
 test("decide: a resume that never brought the agent up fails, after the grace period", () => {
   const now = 1_000_000;
-  const sent = rec({ resumed: now - 5_000 });
+  // Claude can take well over 15 s to start on Windows, and after a reboot many start at once.
+  const sent = rec({ resumed: now - 40_000 });
   assert.equal(decide(sent, { state: "interrupted", now, cameBack: false }), "wait", "still starting");
-  const late = rec({ resumed: now - 30_000 });
+  const late = rec({ resumed: now - 90_000 });
   assert.equal(decide(late, { state: "interrupted", now, cameBack: false }), "fail");
   assert.equal(decide(late, { state: "interrupted", now, cameBack: true }), "wait", "it came up, then was quit");
   assert.equal(decide(late, { state: "interrupted", now, cameBack: null }), "fail", "unknown, recent: failed");
@@ -121,6 +124,15 @@ test("a Windows command line splits like the program sees it", () => {
   assert.deepEqual(winArgv(`"C:\\Program Files\\x\\claude.exe" --model opus --add-dir "C:\\a b" c`), ["C:\\Program Files\\x\\claude.exe", "--model", "opus", "--add-dir", "C:\\a b", "c"]);
   assert.deepEqual(winArgv(`claude --append "say \\"hi\\""`), ["claude", "--append", 'say "hi"']);
   assert.deepEqual(winArgv(""), []);
+});
+
+test("Windows: which terminals run a Windows shell, and tasklist's pids", () => {
+  assert.ok(isWindowsShell(["pwsh.exe", "-NoExit"]));
+  assert.ok(isWindowsShell(["cmd.exe"]));
+  assert.ok(!isWindowsShell(["/bin/bash"]));
+  const out = '"claude.exe","33376","Console","1","7.776 Ko"\r\n"claude.exe","63156","Console","1","468.972 Ko"\r\n';
+  assert.deepEqual([...parseTasklist(out)], [33376, 63156]);
+  assert.equal(parseTasklist("INFO: No tasks are running which match the specified criteria.").size, 0);
 });
 
 test("addresses split into machine and id", () => {

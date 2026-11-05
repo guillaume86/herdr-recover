@@ -7,6 +7,10 @@
 # Recover mod in the Herdr app can bring the session back after a restart or
 # a reboot. It needs only sh, sed and hc: no node, python or jq.
 #
+# Starting a process costs a lot under Git Bash (hundreds of ms when antivirus
+# looks at each one), so the JSON is read with one sed per document and the
+# rest is shell builtins.
+#
 # It never fails the agent: every exit is 0, and anything unexpected is a
 # silent exit (RECOVER_DEBUG=1 says why on stderr).
 
@@ -17,63 +21,130 @@ input=$(cat 2>/dev/null) || exit 0
 hc="${RECOVER_HC:-hc}"
 command -v "$hc" >/dev/null 2>&1 || { say "no hc on PATH"; exit 0; }
 
-# A JSON string field's raw value (escapes kept), first match. Fields are flat in hook input.
-field() {
-  printf '%s' "$input" | tr -d '\n' | sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\"\(\([^\"\\\\]\|\\\\.\)*\)\".*/\1/p" | head -n 1
+# `key=value` lines for the string fields named, from a JSON document on stdin, in one
+# sed: the lines are joined, kept in the hold space, and each field copied out of a fresh
+# copy. Values are raw (JSON escapes kept); a value with an escaped quote is cut short.
+# A field given as `name:key` is printed as `name=` (for keys with dots or quotes).
+fields() {
+  script='$!{
+:a
+N
+$!ba
 }
-# Undo JSON escapes a path can carry: \\ and \" and \/.
-unescape() { printf '%s' "$1" | sed 's/\\\\/\\/g; s/\\"/"/g; s/\\\//\//g'; }
+s/\n//g
+h'
+  for f in "$@"; do
+    name=${f%%:*}; key=${f#*:}
+    script="$script
+g
+s/.*\"$key\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/$name=\1/p"
+  done
+  sed -n "$script"
+}
 
-event=$(field hook_event_name)
-session=$(field session_id)
+# Undo the JSON escapes a path can carry: \\ and \/.
+unescape() {
+  v=$1; out=
+  while :; do
+    case $v in
+      *'\\'*) out="$out${v%%'\\'*}\\"; v=${v#*'\\'} ;;
+      *) break ;;
+    esac
+  done
+  v="$out$v"; out=
+  while :; do
+    case $v in
+      *'\/'*) out="$out${v%%'\/'*}/"; v=${v#*'\/'} ;;
+      *) break ;;
+    esac
+  done
+  printf '%s' "$out$v"
+}
+
+event= session= agent_id= cwd= reason=
+while IFS= read -r line; do
+  case $line in
+    e=*) event=${line#e=} ;;
+    s=*) session=${line#s=} ;;
+    a=*) agent_id=${line#a=} ;;
+    c=*) cwd=${line#c=} ;;
+    r=*) reason=${line#r=} ;;
+  esac
+done <<EOF
+$(printf '%s' "$input" | fields e:hook_event_name s:session_id a:agent_id c:cwd r:reason)
+EOF
+
 case "$session" in
   "" | -* | *[!A-Za-z0-9._:-]*) say "no usable session id"; exit 0 ;;
 esac
 # A sub-agent's session belongs to its parent's terminal record, not in place of it.
-[ -z "$(field agent_id)" ] || { say "a sub-agent"; exit 0; }
+[ -z "$agent_id" ] || { say "a sub-agent"; exit 0; }
 
-# What the terminal remembers now.
-labels=$("$hc" get "$HC_TERMINAL_ID" --json 2>/dev/null) || { say "hc get failed"; exit 0; }
-label() { printf '%s' "$labels" | tr -d '\n' | sed -n "s/.*\"recover\.$1\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" | head -n 1; }
-old=$(label session)
-# The terminal's own program (its shell): the record names it, so a new shell after a
-# restart tells the mod the session was lost. hc sorts its keys, so the top-level "pid"
-# is the one right after "parent" (`foreground` has a "pid" of its own: the agent's).
-shell_pid=$(printf '%s' "$labels" | tr -d '\n' | sed -n 's/.*"parent"[[:space:]]*:[[:space:]]*\(null\|"[^"]*"\)[[:space:]]*,[[:space:]]*"pid"[[:space:]]*:[[:space:]]*\([0-9]*\).*/\2/p' | head -n 1)
-[ -n "$shell_pid" ] || { say "no terminal pid in hc get"; exit 0; }
+# What the terminal remembers now, and its own program (its shell): the record names it,
+# so a new shell after a restart tells the mod the session was lost. hc sorts its keys,
+# so the top-level "pid" is the one right after "parent" (`foreground` has its own).
+old= shell_pid=
+while IFS= read -r line; do
+  case $line in
+    o=*) old=${line#o=} ;;
+    p=*) shell_pid=${line#p=} ;;
+  esac
+done <<EOF
+$("$hc" get "$HC_TERMINAL_ID" --json 2>/dev/null | sed -n '$!{
+:a
+N
+$!ba
+}
+s/\n//g
+h
+s/.*"recover\.session"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/o=\1/p
+g
+s/.*"parent"[[:space:]]*:[[:space:]]*\(null\|"[^"]*"\)[[:space:]]*,[[:space:]]*"pid"[[:space:]]*:[[:space:]]*\([0-9]*\).*/p=\2/p')
+EOF
+[ -n "$shell_pid" ] || { say "no terminal pid from hc get"; exit 0; }
 
 config="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 sessions="$config/sessions"
-# Claude Code keeps sessions/<pid>.json for each interactive process; a session's file
-# says whether it is interactive, and whether it is still running.
-session_file() { grep -l "\"sessionId\":\"$1\"" "$sessions"/*.json 2>/dev/null | head -n 1; }
-kind_of() { [ -n "$1" ] && sed -n 's/.*"kind":"\([a-z]*\)".*/\1/p' "$1" | head -n 1; }
 
 case "$event" in
   SessionStart)
-    mine=$(session_file "$session")
-    kind=$(kind_of "$mine")
+    # Claude Code keeps sessions/<pid>.json for each interactive process. The one naming
+    # this session, and its kind, in one sed over them all (F prints the file's name).
+    mine= kind=
+    while IFS= read -r line; do
+      case $line in
+        k=*) kind=${line#k=} ;;
+        ?*) [ -z "$mine" ] && mine=$line ;;
+      esac
+    done <<EOF
+$(sed -n "/\"sessionId\":\"$session\"/{F;s/.*\"kind\":\"\([a-z]*\)\".*/k=\1/p}" "$sessions"/*.json 2>/dev/null)
+EOF
     # A `claude -p` the agent ran as a tool inherits HC_TERMINAL_ID and fires SessionStart
     # too. It must not take the place of the interactive session: not when it says it isn't
     # interactive, and not while the remembered session is still running here.
     if [ -n "$kind" ] && [ "$kind" != "interactive" ]; then say "not interactive ($kind)"; exit 0; fi
     if [ -n "$old" ] && [ "$old" != "$session" ] && [ -z "$mine" ]; then
-      oldfile=$(session_file "$old")
-      if [ "$(kind_of "$oldfile")" = "interactive" ]; then say "nested under live session $old"; exit 0; fi
+      # Exit 1: a file names the remembered session as interactive (0: none, 2: no files).
+      sed -n "/\"sessionId\":\"$old\"/{/\"kind\":\"interactive\"/q1}" "$sessions"/*.json 2>/dev/null
+      [ $? -eq 1 ] && { say "nested under live session $old"; exit 0; }
     fi
-    cwd=$(unescape "$(field cwd)")
+    cwd=$(unescape "$cwd")
     # The session file, for the mod to tell a running session from a lost one by reading it
-    # (hc can't see a child program on Windows). In the app's own path form: C:/Users/... there.
+    # (hc can't see a child program on Windows), in the app's own path form there: /c/x is C:/x.
     file=$mine
-    if [ -n "$file" ] && command -v cygpath >/dev/null 2>&1; then file=$(cygpath -m "$file"); fi
+    case $file in
+      /[A-Za-z]/*) drive=${file#/}; drive=${drive%%/*}; file="$drive:/${file#/?/}" ;;
+      /*) if command -v cygpath >/dev/null 2>&1; then file=$(cygpath -m "$file"); fi ;;
+    esac
     flags="[]"
-    # The agent's launch flags, from its process (Linux; the mod fills them in elsewhere).
-    if [ -r /proc/self/stat ]; then
+    # The agent's launch flags, from its process: Linux only (the mod fills them in on
+    # Windows). Not under Git Bash, whose /proc can block reading a native Windows process.
+    if [ -r /proc/self/stat ] && [ ! -e /proc/cygdrive ]; then
       pid=$$
       i=0
       while [ "$pid" -gt 1 ] && [ $i -lt 12 ]; do
         i=$((i + 1))
-        first=$(tr '\0' '\n' < "/proc/$pid/cmdline" 2>/dev/null | head -n 1)
+        first=$(tr '\0' '\n' < "/proc/$pid/cmdline" 2>/dev/null | sed -n 1p)
         case "${first##*/}" in
           claude)
             flags=$(tr '\0' '\n' < "/proc/$pid/cmdline" 2>/dev/null | awk '
@@ -97,15 +168,13 @@ case "$event" in
               }')
             break ;;
         esac
-        pid=$(awk '{print $4}' "/proc/$pid/stat" 2>/dev/null) || break
+        read -r _ _ _ pid _ < "/proc/$pid/stat" 2>/dev/null || break
         [ -n "$pid" ] || break
       done
     fi
-    now=$(date +%s)000
-    same=
-    [ "$old" = "$session" ] && same=1
+    now="${EPOCHSECONDS:-$(date +%s)}000"
     # The same session starting again (a resume, a compaction) keeps its marks; a new one starts clean.
-    if [ -n "$same" ]; then
+    if [ "$old" = "$session" ]; then
       "$hc" label "$HC_TERMINAL_ID" "recover.cwd=$cwd" "recover.shell=$shell_pid" "recover.failed=" ${file:+"recover.file=$file"} >/dev/null 2>&1
     else
       "$hc" label "$HC_TERMINAL_ID" "recover.agent=claude" "recover.session=$session" "recover.cwd=$cwd" \
@@ -116,7 +185,6 @@ case "$event" in
     ;;
   SessionEnd)
     [ "$old" = "$session" ] || { say "not the remembered session"; exit 0; }
-    reason=$(field reason)
     case "$reason" in
       clear | resume) say "ignored ($reason)" ;;        # the same process starts another session
       other) say "kept (a signal)" ;;                   # a crash, a kill, a shutdown: worth bringing back

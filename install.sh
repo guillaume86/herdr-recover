@@ -45,7 +45,7 @@ edit_settings() { # $1 = add|remove
     if [ "$1" = add ]; then
       jq --arg cmd "$command" '
         .hooks //= {} |
-        .hooks.SessionStart = ([(.hooks.SessionStart // [])[] | .hooks = [(.hooks // [])[] | select((.command // "") | contains("herdr-recover") | not)] | select(.hooks | length > 0)] + [{"hooks":[{"type":"command","command":$cmd,"timeout":10}]}]) |
+        .hooks.SessionStart = ([(.hooks.SessionStart // [])[] | .hooks = [(.hooks // [])[] | select((.command // "") | contains("herdr-recover") | not)] | select(.hooks | length > 0)] + [{"hooks":[{"type":"command","command":$cmd,"timeout":10,"async":true}]}]) |
         .hooks.SessionEnd = ([(.hooks.SessionEnd // [])[] | .hooks = [(.hooks // [])[] | select((.command // "") | contains("herdr-recover") | not)] | select(.hooks | length > 0)] + [{"hooks":[{"type":"command","command":$cmd,"timeout":10}]}])
       ' "$native" > "$settings.tmp"
     else
@@ -73,7 +73,12 @@ for event in ("SessionStart", "SessionEnd"):
         if kept:
             groups.append({**g, "hooks": kept})
     if mode == "add":
-        groups.append({"hooks": [{"type": "command", "command": cmd, "timeout": 10}]})
+        hook = {"type": "command", "command": cmd, "timeout": 10}
+        # SessionStart runs in the background: Claude doesn't wait for it to start. SessionEnd
+        # stays in the foreground, so an /exit is forgotten before Claude is gone.
+        if event == "SessionStart":
+            hook["async"] = True
+        groups.append({"hooks": [hook]})
     if groups:
         hooks[event] = groups
     else:

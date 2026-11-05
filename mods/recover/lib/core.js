@@ -121,9 +121,26 @@ export const clearArgs = () => labelArgs(Object.fromEntries(KEYS.filter((k) => k
  */
 export function stateOf(rec, { live, pid }) {
   if (!rec) return null;
-  if (live) return "running";
+  // A new program in the terminal: whatever ran under the old one is gone with it, even if
+  // files it left say otherwise (a killed agent never removes its session file). The hook
+  // and every resume record the program they ran under, so a session restarted by hand
+  // doesn't land here.
   if (rec.shell !== null && pid !== null && rec.shell !== pid) return rec.failed ? "failed" : "lost";
+  if (live) return "running";
   return rec.failed ? "failed" : "interrupted";
+}
+
+/** A terminal running a Windows shell, where hc can't see the program in front of it. */
+export const isWindowsShell = (argv = []) => shellKind(argv) !== "posix";
+
+/** The pids in `tasklist /FO CSV /NH` output. */
+export function parseTasklist(text) {
+  const pids = new Set();
+  for (const line of String(text ?? "").split(/\r?\n/)) {
+    const m = /^"[^"]*","(\d+)"/.exec(line.trim());
+    if (m) pids.add(Number(m[1]));
+  }
+  return pids;
 }
 
 /**
@@ -138,7 +155,7 @@ export function stateOf(rec, { live, pid }) {
  * after an app restart: then a resume still waiting after `graceMs`, and younger than
  * `failWithinMs`, counts as failed; an older one as having worked and been quit since.
  */
-export function decide(rec, { state, cameBack = null, now = Date.now(), graceMs = 15_000, failWithinMs = 120_000 }) {
+export function decide(rec, { state, cameBack = null, now = Date.now(), graceMs = 60_000, failWithinMs = 180_000 }) {
   if (!rec || !AGENTS[rec.agent] || !validId(rec.session)) return "wait";
   if (state === "lost") return rec.auto ? "resume" : "wait";
   if (state !== "interrupted" || !rec.resumed || cameBack === true) return "wait";

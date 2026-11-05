@@ -88,7 +88,7 @@ name="another session's end is ignored"
 fire "{\"hook_event_name\":\"SessionEnd\",\"session_id\":\"$OTHER\",\"reason\":\"prompt_input_exit\"}"
 none
 
-if [ -r /proc/self/cmdline ]; then
+if [ -r /proc/self/cmdline ] && [ "$(uname -s)" = Linux ]; then
   name="on Linux the agent's launch flags are read from its process"
   terminal ""
   session_file 777 "$ID" interactive
