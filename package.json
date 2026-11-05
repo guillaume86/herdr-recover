@@ -1,6 +1,6 @@
 {
   "name": "herdr-recover",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "description": "Bring back the coding agent a Herdr terminal lost to a restart or a reboot (Claude Code, Codex, OpenCode, Pi), on every machine with herdr-core, without the Herdr app.",

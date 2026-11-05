@@ -2,7 +2,7 @@
 
 Bring back the coding agent a [Herdr](https://herdr.dev) terminal lost to a restart or a
 reboot, **on every machine with herdr-core** (this computer, a WSL distro, a server), with no
-app or client running. Claude Code, Codex, OpenCode and Pi. Windows included (with Git Bash).
+app or client running. Claude Code, Codex, OpenCode 2 and Pi. Windows included (with Git Bash).
 
 Herdr keeps terminals through app restarts and updates. When the machine reboots or
 herdr-core stops, kept terminals come back as fresh shells in the same folder, but the
@@ -10,13 +10,18 @@ agent that ran there is gone. Recover remembers which session each terminal held
 when the terminal comes back as a new shell, types the command that resumes it, with the
 same flags. A session you quit stays quit.
 
-Status: **v2 (branch).** herdr-core itself now does the resuming, through the shell it
-starts, so the Herdr app is optional. Tested on Linux against a separate herdr-core 0.1.18
-(core stop, core and holder killed, shells killed, a slow profile): Claude Code (a stand-in
-running the real hook) and OpenCode 2.0.28 came back on their sessions with their flags, and
-an OpenCode session quit by hand was forgotten. The Windows path (PowerShell starting the
-job through Git Bash) is written and unit-tested but not yet run on Windows. See
-[Limits](#limits).
+Status: **0.2.** herdr-core itself does the resuming, through the shell it starts, so the
+Herdr app is optional. Tested against a separate herdr-core 0.1.18, losing its terminals with a
+core stop:
+
+- **Windows 11** (PowerShell 7, Git Bash): a real Claude Code session came back on its
+  conversation, and one quit with `/exit` was forgotten; terminals keep their folder.
+- **WSL** (Ubuntu 24.04, where `/bin/sh` is dash): the same, with a real Claude Code session.
+- **Linux**: Claude Code (a stand-in running the real hook) and OpenCode 2.0.28 came back on
+  their sessions with their flags (also after the core and its holder were killed, shells
+  were killed, and with a slow profile), and an OpenCode session quit by hand was forgotten.
+
+A real reboot (or `wsl --shutdown`) hasn't been tried yet. See [Limits](#limits).
 
 | Agent | Recover comes as | Resumes with | A quit is told by | Windows |
 |---|---|---|---|---|
@@ -90,7 +95,6 @@ pi install git:github.com/guillaume86/herdr-recover
 mkdir -p ~/.config/opencode/herdr-recover
 cp herdr-recover/opencode/tui.js ~/.config/opencode/herdr-recover/tui.js
 #   then add "./herdr-recover" to "plugins" in ~/.config/opencode/cli.json
-# (OpenCode 1: herdr-recover/opencode/herdr-recover.js in ~/.config/opencode/plugins/)
 ```
 
 The agents' hooks need `hc` on their PATH (`RECOVER_HC` overrides). Updates:
@@ -205,13 +209,16 @@ go away with the terminal. `hc get t3 --json` shows them.
   a session started in another one than that is not remembered (Recover's checks keep it
   from landing on the wrong terminal). Run `codex --no-daemon` in herdr terminals for every
   session to be remembered; the flag is carried to the resume.
-- **OpenCode 1** gets the plugin file of before: its sessions are resumed, but one you quit
-  comes back after a restart unless the app saw you quit it.
+- **OpenCode 1 isn't supported**: Recover needs OpenCode 2 (the installer says so, and takes
+  out the plugin file an earlier Recover put there).
 - **An agent that died under a shell that lived on** (Interrupted) is not resumed by
   itself: the shell isn't new. The dialog offers Resume, or type it yourself.
 - **Nothing happens until something starts the core** after a reboot: the Herdr app
   reconnecting, or any `hc` command. Then the kept terminals get their new shells.
-- **Windows is untested**, and Codex isn't supported there.
+- **On Windows only Claude Code is tested.** OpenCode 2 and Pi are untested there, and Codex
+  isn't supported.
+- **In fish**, a session whose folder or flags hold a backslash isn't typed back (fish reads
+  escapes inside quotes): the app shows it lost, and you resume it by hand.
 - **A `shell` set over several lines** in herdr-core's config is left alone by the
   installer: put it on one line first.
 - Typing into a shell that is still reading its profile relies on the terminal keeping the
@@ -229,9 +236,10 @@ npm test    # the rules, recover-shell.sh (against the mod's rules and a fake hc
             # OpenCode and Pi plugins, install.sh in a throwaway home, then the hook
 ```
 
-`herdr-app check mods/recover` loads the mod once. Run the shell tests on Linux too
-(`sh test/hook.test.sh` and `node --test` in WSL): `/bin/sh` is dash there, and the flag
-reading only runs where `/proc` exists. `RECOVER_SOURCE=$PWD sh install.sh` installs the
+`herdr-app check mods/recover` loads the mod once. `npm test` runs on Windows too, from Git
+Bash (the plugins' signal cases are skipped there: Windows can't send a signal a listener
+sees). Run it on Linux as well (in WSL, say): `/bin/sh` is dash there, and the flag reading
+only runs where `/proc` exists. `RECOVER_SOURCE=$PWD sh install.sh` installs the
 integrations from the clone; `claude --plugin-dir .` loads the Claude Code plugin for one
 session. To try herdr-core's shell without touching your own core, run a second one: with
 `XDG_RUNTIME_DIR` set to a short folder of your own (sockets are limited to 108 bytes, and
