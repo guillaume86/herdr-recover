@@ -12,7 +12,7 @@
       { "hooks": [{ "type": "command", "command": "sh \"${CLAUDE_PLUGIN_ROOT}/hook/recover-hook.sh\" claude", "async": true, "timeout": 10 }] }
     ],
     "SessionEnd": [
-      { "hooks": [{ "type": "command", "command": "sh \"${CLAUDE_PLUGIN_ROOT}/hook/recover-hook.sh\" claude", "timeout": 10 }] }
+      { "hooks": [{ "type": "command", "command": ". \"${CLAUDE_PLUGIN_ROOT}/hook/recover-end.sh\"", "async": true, "timeout": 30 }] }
     ]
   }
 }

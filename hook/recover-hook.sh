@@ -1,7 +1,8 @@
 #!/bin/sh
 # herdr-recover: remember the agent session on its herdr-core terminal.
 #
-#   sh recover-hook.sh claude   Claude Code's SessionStart and SessionEnd hook
+#   sh recover-hook.sh claude   Claude Code's SessionStart hook (its SessionEnd sources
+#                               recover-end.sh; given one, this hands it over)
 #   sh recover-hook.sh codex    Codex's SessionStart hook
 #
 # The agent runs it with the event as JSON on stdin (Claude Code through sh, or
@@ -11,10 +12,10 @@
 # hc: no node, python or jq. The agent plugins (.claude-plugin, .codex-plugin)
 # point their hooks here.
 #
-# Starting a process costs a lot under Git Bash (hundreds of ms when antivirus
-# looks at each one), so the event is read with shell builtins, a SessionEnd
-# costs one hc call, and a SessionStart (which runs in the background) reads
-# the terminal with one hc and one sed.
+# Starting a process costs a lot under Git Bash (up to a second or more when an
+# antivirus looks at each one), so the event is read with shell builtins, and a
+# SessionStart (which runs in the background) reads the terminal with one hc and
+# one sed.
 #
 # It never fails the agent: every exit is 0, and anything unexpected is a
 # silent exit (RECOVER_DEBUG=1 says why on stderr).
@@ -214,16 +215,10 @@ EOF
     record "${CODEX_HOME:-}" "" "[]"
     ;;
   claude:SessionEnd)
-    case "$reason" in
-      clear | resume) say "ignored ($reason)" ;;        # the same process starts another session
-      other) say "kept (a signal)" ;;                   # a crash, a kill, a shutdown: worth bringing back
-      *)
-        # The person ended it. One hc call and nothing else, to fit in Claude Code's exit
-        # budget: the mark names the session, so the mod forgets the record only when it is
-        # this one's (a `claude -p` ending under it leaves it be).
-        "$hc" label "$HC_TERMINAL_ID" "recover.ended=$session" >/dev/null 2>&1
-        say "ended ($reason)" ;;
-    esac
+    # The plugin sources recover-end.sh for this (Claude Code's 1.5 s exit budget); called
+    # here anyway (an older plugin command), the same rules, with the event already read.
+    recover_event=$input
+    . "${0%/*}/recover-end.sh"
     ;;
   *) say "$agent $event: nothing to do" ;;
 esac

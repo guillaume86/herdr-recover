@@ -150,13 +150,16 @@ On the computer that runs the Herdr app: delete `~/.config/herdr-app/mods/recove
    there) with `recover.session`, the folder, the carried flags and the terminal's own
    program pid (`recover.shell`), and marks the session ended (`recover.ended=<id>`) when
    the person quits it:
-   - **Claude Code**: a plugin whose `SessionStart` and `SessionEnd` hooks run
+   - **Claude Code**: a plugin whose `SessionStart` hook runs
      [`hook/recover-hook.sh`](hook/recover-hook.sh) (`sh`, Git Bash on Windows, with `sed`
      and `hc` only). It also records the agent's session file
      (`~/.claude/sessions/<pid>.json`) and reads the flags from `/proc` on Linux. It skips
      `claude -p` runs an agent starts as a tool, and sub-agents. At `SessionEnd`, `/exit`,
-     Ctrl+C and `/logout` mark the session ended; a signal (`other`) keeps it. That costs
-     one `hc` call: Claude Code gives plugin `SessionEnd` hooks 1.5 s in all.
+     Ctrl+C and `/logout` mark the session ended; a signal (`other`) keeps it. Claude Code
+     gives plugin `SessionEnd` hooks 1.5 s in all, which one program start can take on a slow
+     machine, so that hook ([`hook/recover-end.sh`](hook/recover-end.sh)) is async (Claude
+     Code exits without waiting for it), and is sourced by the shell Claude Code starts for
+     it, reads the event with builtins, and leaves its one `hc` call in the background.
    - **Codex**: a plugin whose `SessionStart` hook runs the same script. Codex runs hooks
      in a background server its terminals share (see [Limits](#limits)), so the hook only
      labels a terminal where Codex is the program in front and isn't resuming another

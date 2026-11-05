@@ -107,6 +107,6 @@ export default function (pi: any) {
   // "new", "resume", "fork" and "reload" go on in another session, which records itself.
   pi.on("session_shutdown", (event: any, ctx: any) => {
     if (event?.reason !== "quit" || signaled || ctx?.mode !== "tui" || !recorded) return;
-    try { execFileSync(HC, ["label", terminal, `recover.ended=${recorded}`], { timeout: 3_000, stdio: "ignore", windowsHide: true }); } catch { /* hc gone */ }
+    try { execFileSync(HC, ["label", terminal, `recover.ended=${recorded}`], { timeout: 10_000, stdio: "ignore", windowsHide: true }); } catch { /* hc gone */ }
   });
 }

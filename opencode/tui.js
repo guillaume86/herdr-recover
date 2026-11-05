@@ -81,7 +81,7 @@ function setup(api) {
   }
   process.on("exit", (code) => {
     if (code !== 0 || signaled || !recorded) return;
-    try { execFileSync(HC, ["label", terminal, `recover.ended=${recorded}`], { timeout: 3_000, stdio: "ignore", windowsHide: true }); } catch { /* hc gone */ }
+    try { execFileSync(HC, ["label", terminal, `recover.ended=${recorded}`], { timeout: 10_000, stdio: "ignore", windowsHide: true }); } catch { /* hc gone */ }
   });
 
   // The session a sub-agent's belongs to: the terminal's record is the root's.

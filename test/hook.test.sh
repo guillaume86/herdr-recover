@@ -28,7 +28,7 @@ terminal() { # $1 = recover.* labels as JSON members (may be empty), $2 = the pr
 session_file() { printf '{"pid":%s,"sessionId":"%s","cwd":"/w","kind":"%s"}' "$1" "$2" "$3" > "$tmp/claude/sessions/$1.json"; }
 fire() { # $1 = JSON payload, $2 = the agent (default: Claude Code's hook, called without one)
   : > "$tmp/labels"
-  printf '%s' "$1" | HC_TERMINAL_ID=t3 RECOVER_HC="$tmp/hc" CLAUDE_CONFIG_DIR="$tmp/claude" sh "$hook" ${2:+"$2"}
+  printf '%s' "$1" | HC_TERMINAL_ID=t3 RECOVER_HC="$tmp/hc" CLAUDE_CONFIG_DIR="$tmp/claude" RECOVER_SYNC=1 sh "$hook" ${2:+"$2"}
   echo "exit $?" >> "$tmp/labels"
 }
 has() { grep -qxF -- "$1" "$tmp/labels" || { echo "FAIL ($name): expected label $1"; cat "$tmp/labels"; fails=$((fails + 1)); }; }
@@ -145,5 +145,47 @@ name="outside a herdr terminal it does nothing"
 : > "$tmp/labels"
 printf '{"hook_event_name":"SessionStart","session_id":"%s"}' "$ID" | HC_TERMINAL_ID= RECOVER_HC="$tmp/hc" sh "$hook"
 [ $? = 0 ] && none
+
+# Claude Code's SessionEnd sources recover-end.sh in the shell it starts for the hook (its 1.5 s
+# exit budget can't hold one more program start on a slow machine).
+end="$here/../hook/recover-end.sh"
+end_fire() { # $1 = JSON payload; the rest: env assignments
+  p=$1; shift
+  : > "$tmp/labels"
+  printf '%s' "$p" | env HC_TERMINAL_ID=t3 RECOVER_HC="$tmp/hc" "$@" sh -c '. "$1"; echo "after exit"' sh "$end" >> "$tmp/labels"
+  echo "exit $?" >> "$tmp/labels"
+}
+
+name="the plugin's SessionEnd command sources recover-end.sh"
+grep -qF '". \"${CLAUDE_PLUGIN_ROOT}/hook/recover-end.sh\""' "$here/../.claude-plugin/plugin.json" \
+  || { echo "FAIL ($name): plugin.json"; fails=$((fails + 1)); }
+
+name="sourced: /exit marks the session ended, and it ends the shell with 0"
+end_fire "{\"hook_event_name\":\"SessionEnd\",\"session_id\":\"$ID\",\"reason\":\"prompt_input_exit\"}" RECOVER_SYNC=1
+has "recover.ended=$ID"; exited0
+grep -q "after exit" "$tmp/labels" && { echo "FAIL ($name): the shell went on"; fails=$((fails + 1)); }
+
+name="sourced: a signal, /clear and a sub-agent's end mark nothing"
+for p in "{\"session_id\":\"$ID\",\"reason\":\"other\"}" "{\"session_id\":\"$ID\",\"reason\":\"clear\"}" \
+  "{\"session_id\":\"$ID\",\"agent_id\":\"a1\",\"reason\":\"prompt_input_exit\"}" "{\"session_id\":\"x;y\",\"reason\":\"prompt_input_exit\"}"; do
+  end_fire "$p" RECOVER_SYNC=1
+  none; exited0
+done
+
+name="sourced: outside a herdr terminal it does nothing"
+end_fire "{\"session_id\":\"$ID\",\"reason\":\"prompt_input_exit\"}" HC_TERMINAL_ID= RECOVER_SYNC=1
+none; exited0
+
+name="sourced: it returns before hc does (hc goes on in the background)"
+cat > "$tmp/slowhc" <<EOF
+#!/bin/sh
+sleep 2
+shift; shift; printf '%s\n' "\$@" >> "$tmp/labels"
+EOF
+chmod +x "$tmp/slowhc"
+end_fire "{\"session_id\":\"$ID\",\"reason\":\"prompt_input_exit\"}" RECOVER_HC="$tmp/slowhc"
+none; exited0
+i=0; while [ $i -lt 40 ] && ! grep -qxF "recover.ended=$ID" "$tmp/labels"; do sleep 0.25; i=$((i + 1)); done
+has "recover.ended=$ID"
 
 if [ "$fails" = 0 ]; then echo "hook: all passed"; else echo "hook: $fails failed"; exit 1; fi
