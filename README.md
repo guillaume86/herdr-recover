@@ -47,7 +47,7 @@ On **every machine whose agents should come back** (this computer, each WSL dist
 server), in a terminal there:
 
 ```sh
-git clone <this repo> herdr-recover   # or copy it there
+git clone https://github.com/guillaume86/herdr-recover
 sh herdr-recover/install.sh
 ```
 
