@@ -74,11 +74,11 @@ name="a malformed session id is refused"
 fire '{"hook_event_name":"SessionStart","session_id":"x;rm -rf /","cwd":"/w"}'
 none; exited0
 
-name="/exit forgets the session"
+name="/exit marks the session ended, with one hc call and nothing else"
 terminal "\"recover.session\":\"$ID\""
 fire "{\"hook_event_name\":\"SessionEnd\",\"session_id\":\"$ID\",\"reason\":\"prompt_input_exit\"}"
-has "recover.session="; has "recover.shell="
-grep -q '^recover.auto' "$tmp/labels" && { echo "FAIL ($name): auto was touched"; fails=$((fails + 1)); }
+has "recover.ended=$ID"
+[ "$(grep -c '^recover\.' "$tmp/labels")" = 1 ] || { echo "FAIL ($name): more than the mark"; cat "$tmp/labels"; fails=$((fails + 1)); }
 
 name="a signal keeps it; /clear leaves it to the next SessionStart"
 fire "{\"hook_event_name\":\"SessionEnd\",\"session_id\":\"$ID\",\"reason\":\"other\"}"
@@ -86,9 +86,14 @@ none
 fire "{\"hook_event_name\":\"SessionEnd\",\"session_id\":\"$ID\",\"reason\":\"clear\"}"
 none
 
-name="another session's end is ignored"
+name="another session's end marks that session only (the mod compares it with the record)"
 fire "{\"hook_event_name\":\"SessionEnd\",\"session_id\":\"$OTHER\",\"reason\":\"prompt_input_exit\"}"
-none
+has "recover.ended=$OTHER"
+
+name="a field that is null is not a value (agent_id: null is no sub-agent)"
+terminal ""
+fire "{\"hook_event_name\":\"SessionStart\",\"agent_id\":null,\"session_id\":\"$ID\",\"cwd\":\"/w\"}"
+has "recover.session=$ID"; has "recover.ended="
 
 if [ -r /proc/self/cmdline ] && [ "$(uname -s)" = Linux ]; then
   name="on Linux the agent's launch flags are read from its process"

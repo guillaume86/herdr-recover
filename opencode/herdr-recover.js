@@ -69,10 +69,10 @@ async function record(terminal, session, cwd) {
   if (!t?.pid) return;
   const same = t.labels?.["recover.session"] === session;
   const labels = same
-    ? { cwd, shell: t.pid, pid: process.pid, failed: "" }
+    ? { cwd, shell: t.pid, pid: process.pid, failed: "", ended: "" }
     : {
       agent: "opencode", session, cwd, flags: JSON.stringify(carried(args())), dir: "", file: "",
-      shell: t.pid, pid: process.pid, at: Date.now(), resumed: "", failed: "",
+      shell: t.pid, pid: process.pid, at: Date.now(), resumed: "", failed: "", ended: "",
     };
   await hc(["label", terminal, ...Object.entries(labels).map(([k, v]) => `recover.${k}=${v ?? ""}`)]);
 }

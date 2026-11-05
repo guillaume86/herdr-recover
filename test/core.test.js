@@ -150,6 +150,13 @@ test("Codex, OpenCode and Pi: known by their command, resumed their own way, wit
   assert.equal(readRecord(labels({ session: ID, pid: 42 })).pid, 42);
 });
 
+test("decide: a session Claude Code's SessionEnd marked ended is forgotten, restart or not", () => {
+  assert.equal(decide(rec({ ended: ID }), { state: "lost" }), "forget");
+  assert.equal(decide(rec({ ended: ID }), { state: "interrupted" }), "forget");
+  assert.equal(decide(rec({ ended: "11111111-2222-3333-4444-555555555555" }), { state: "lost" }), "resume", "a nested run's end");
+  assert.ok(clearArgs().includes("recover.ended="));
+});
+
 test("decide: an agent with no end hook, seen gone from its shell, was quit", () => {
   const now = 1_000_000;
   const codex = rec({ agent: "codex" });

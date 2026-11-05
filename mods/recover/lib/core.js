@@ -8,7 +8,7 @@
 // kept across core restarts and reboots and go away with the terminal.
 
 export const PREFIX = "recover.";
-export const KEYS = ["agent", "session", "cwd", "flags", "dir", "file", "pid", "shell", "at", "resumed", "failed", "auto"];
+export const KEYS = ["agent", "session", "cwd", "flags", "dir", "file", "pid", "shell", "at", "resumed", "failed", "ended", "auto"];
 
 // What Recover knows of each agent: how it resumes a session, the launch flags a
 // resume should get back (with how many values each takes), and how a session the
@@ -138,6 +138,8 @@ export function readRecord(labels) {
     at: num(get("at")),
     resumed: num(get("resumed")),
     failed: num(get("failed")),
+    // The session the person ended (Claude Code's SessionEnd): this record's, when they quit it.
+    ended: get("ended") || null,
     auto: get("auto") !== "off",
   };
 }
@@ -201,6 +203,8 @@ export function decide(rec, {
   state, cameBack = null, now = Date.now(), graceMs = 60_000, failWithinMs = 180_000, goneSince = null, goneMs = 8_000,
 }) {
   if (!rec || !AGENTS[rec.agent] || !validId(rec.session)) return "wait";
+  // The person quit it (Claude Code's SessionEnd hook marks it): gone, before or after a restart.
+  if (rec.ended === rec.session) return "forget";
   if (state === "lost") return rec.auto ? "resume" : "wait";
   if (state !== "interrupted") return "wait";
   // A resume on its way, or one that never brought the agent up.

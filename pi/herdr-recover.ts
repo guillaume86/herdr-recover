@@ -47,11 +47,11 @@ async function record(terminal: string, session: string, cwd: string): Promise<v
   if (!t?.pid) return;
   const same = t.labels?.["recover.session"] === session;
   const labels: Record<string, unknown> = same
-    ? { cwd, shell: t.pid, pid: process.pid, failed: "" }
+    ? { cwd, shell: t.pid, pid: process.pid, failed: "", ended: "" }
     : {
       // argv[0] is the runtime, argv[1] the program.
       agent: "pi", session, cwd, flags: JSON.stringify(carried(process.argv.slice(2))), dir: "", file: "",
-      shell: t.pid, pid: process.pid, at: Date.now(), resumed: "", failed: "",
+      shell: t.pid, pid: process.pid, at: Date.now(), resumed: "", failed: "", ended: "",
     };
   await hc(["label", terminal, ...Object.entries(labels).map(([k, v]) => `recover.${k}=${v ?? ""}`)]);
 }

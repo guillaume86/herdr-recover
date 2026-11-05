@@ -12,8 +12,9 @@
 # point their hooks here.
 #
 # Starting a process costs a lot under Git Bash (hundreds of ms when antivirus
-# looks at each one), so the JSON is read with one sed per document and the
-# rest is shell builtins.
+# looks at each one), so the event is read with shell builtins, a SessionEnd
+# costs one hc call, and a SessionStart (which runs in the background) reads
+# the terminal with one hc and one sed.
 #
 # It never fails the agent: every exit is 0, and anything unexpected is a
 # silent exit (RECOVER_DEBUG=1 says why on stderr).
@@ -23,29 +24,22 @@ say() { [ -n "${RECOVER_DEBUG:-}" ] && printf 'recover: %s\n' "$*" >&2; return 0
 agent=${1:-claude}
 case $agent in claude | codex) ;; *) say "unknown agent $agent"; exit 0 ;; esac
 [ -n "${HC_TERMINAL_ID:-}" ] || exit 0
-input=$(cat 2>/dev/null) || exit 0
 hc="${RECOVER_HC:-hc}"
 command -v "$hc" >/dev/null 2>&1 || { say "no hc on PATH"; exit 0; }
 
-# `key=value` lines for the string fields named, from a JSON document on stdin, in one
-# sed: the lines are joined, kept in the hold space, and each field copied out of a fresh
-# copy. Values are raw (JSON escapes kept); a value with an escaped quote is cut short.
-# A field given as `name:key` is printed as `name=` (for keys with dots or quotes).
-fields() {
-  script='$!{
-:a
-N
-$!ba
-}
-s/\n//g
-h'
-  for f in "$@"; do
-    name=${f%%:*}; key=${f#*:}
-    script="$script
-g
-s/.*\"$key\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/$name=\1/p"
-  done
-  sed -n "$script"
+# The event, read and taken apart with builtins only: Claude Code gives SessionEnd hooks
+# 1.5 s in all, and under Git Bash each process started can cost a third of that.
+input=
+while IFS= read -r line || [ -n "$line" ]; do input="$input$line"; done
+
+# REPLY = a top-level string field of the event, raw (JSON escapes kept), or empty when it
+# is absent or not a string. A value with an escaped quote is cut short.
+field() {
+  REPLY=
+  case $input in *"\"$1\""*) ;; *) return 0 ;; esac
+  v=${input#*\"$1\"}
+  v=${v#"${v%%[![:space:]:]*}"}
+  case $v in \"*) v=${v#\"}; REPLY=${v%%\"*} ;; esac
 }
 
 # Undo the JSON escapes a path can carry: \\ and \/.
@@ -67,19 +61,12 @@ unescape() {
   printf '%s' "$out$v"
 }
 
-event= session= agent_id= cwd= reason= transcript=
-while IFS= read -r line; do
-  case $line in
-    e=*) event=${line#e=} ;;
-    s=*) session=${line#s=} ;;
-    a=*) agent_id=${line#a=} ;;
-    c=*) cwd=${line#c=} ;;
-    r=*) reason=${line#r=} ;;
-    t=*) transcript=${line#t=} ;;
-  esac
-done <<EOF
-$(printf '%s' "$input" | fields e:hook_event_name s:session_id a:agent_id c:cwd r:reason t:transcript_path)
-EOF
+field hook_event_name; event=$REPLY
+field session_id; session=$REPLY
+field agent_id; agent_id=$REPLY
+field cwd; cwd=$REPLY
+field reason; reason=$REPLY
+field transcript_path; transcript=$REPLY
 
 case "$session" in
   "" | -* | *[!A-Za-z0-9._:-]*) say "no usable session id"; exit 0 ;;
@@ -91,15 +78,16 @@ esac
 # the record names the shell, so a new shell after a restart tells the mod the session was
 # lost. hc sorts its keys, so the top-level "pid" is the one right after "parent"
 # (`foreground` has its own), and a foreground's "argv" comes first.
-old= shell_pid= front= front_argv=
-while IFS= read -r line; do
-  case $line in
-    o=*) old=${line#o=} ;;
-    p=*) shell_pid=${line#p=} ;;
-    f=*) front=${line#f=} ;;
-    v=*) front_argv=${line#v=} ;;
-  esac
-done <<EOF
+terminal_state() {
+  old= shell_pid= front= front_argv=
+  while IFS= read -r line; do
+    case $line in
+      o=*) old=${line#o=} ;;
+      p=*) shell_pid=${line#p=} ;;
+      f=*) front=${line#f=} ;;
+      v=*) front_argv=${line#v=} ;;
+    esac
+  done <<EOF
 $("$hc" get "$HC_TERMINAL_ID" --json 2>/dev/null | sed -n '$!{
 :a
 N
@@ -115,7 +103,8 @@ s/.*"foreground"[[:space:]]*:[[:space:]]*{[^}]*"name"[[:space:]]*:[[:space:]]*"\
 g
 s/.*"foreground"[[:space:]]*:[[:space:]]*{[[:space:]]*"argv"[[:space:]]*:[[:space:]]*\(\[[^]]*\]\).*/v=\1/p')
 EOF
-[ -n "$shell_pid" ] || { say "no terminal pid from hc get"; exit 0; }
+  [ -n "$shell_pid" ] || { say "no terminal pid from hc get"; exit 0; }
+}
 
 # Labels the terminal with this session: a new one starts clean, the same one starting
 # again (a resume, a compaction) keeps its marks. $1 = config folder, $2 = session file,
@@ -123,18 +112,20 @@ EOF
 record() {
   cwd=$(unescape "$cwd")
   if [ "$old" = "$session" ]; then
-    "$hc" label "$HC_TERMINAL_ID" "recover.cwd=$cwd" "recover.shell=$shell_pid" "recover.failed=" ${2:+"recover.file=$2"} >/dev/null 2>&1
+    "$hc" label "$HC_TERMINAL_ID" "recover.cwd=$cwd" "recover.shell=$shell_pid" "recover.failed=" "recover.ended=" \
+      ${2:+"recover.file=$2"} >/dev/null 2>&1
   else
     now="${EPOCHSECONDS:-$(date +%s)}000"
     "$hc" label "$HC_TERMINAL_ID" "recover.agent=$agent" "recover.session=$session" "recover.cwd=$cwd" \
       "recover.flags=$3" "recover.dir=$1" "recover.shell=$shell_pid" "recover.file=$2" "recover.pid=" \
-      "recover.at=$now" "recover.resumed=" "recover.failed=" >/dev/null 2>&1
+      "recover.at=$now" "recover.resumed=" "recover.failed=" "recover.ended=" >/dev/null 2>&1
   fi
   say "recorded $agent $session in $HC_TERMINAL_ID (shell $shell_pid)"
 }
 
 case "$agent:$event" in
   claude:SessionStart)
+    terminal_state
     sessions="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/sessions"
     # Claude Code keeps sessions/<pid>.json for each interactive process. The one naming
     # this session, and its kind, in one sed over them all (F prints the file's name).
@@ -208,6 +199,7 @@ EOF
     # has none). Two checks keep that from overwriting a record: Codex must be the program
     # in front there, and not one resuming another session (several terminals resuming
     # after a reboot).
+    terminal_state
     [ "${front##*/}" = codex ] || { say "codex isn't in front in $HC_TERMINAL_ID"; exit 0; }
     named=$(printf '%s' "$front_argv" | grep -o -E '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}')
     if [ -n "$named" ] && ! printf '%s\n' "$named" | grep -qxF "$session"; then
@@ -222,14 +214,15 @@ EOF
     record "${CODEX_HOME:-}" "" "[]"
     ;;
   claude:SessionEnd)
-    [ "$old" = "$session" ] || { say "not the remembered session"; exit 0; }
     case "$reason" in
       clear | resume) say "ignored ($reason)" ;;        # the same process starts another session
       other) say "kept (a signal)" ;;                   # a crash, a kill, a shutdown: worth bringing back
       *)
-        "$hc" label "$HC_TERMINAL_ID" recover.agent= recover.session= recover.cwd= recover.flags= \
-          recover.dir= recover.file= recover.pid= recover.shell= recover.at= recover.resumed= recover.failed= >/dev/null 2>&1
-        say "forgot ($reason)" ;;
+        # The person ended it. One hc call and nothing else, to fit in Claude Code's exit
+        # budget: the mark names the session, so the mod forgets the record only when it is
+        # this one's (a `claude -p` ending under it leaves it be).
+        "$hc" label "$HC_TERMINAL_ID" "recover.ended=$session" >/dev/null 2>&1
+        say "ended ($reason)" ;;
     esac
     ;;
   *) say "$agent $event: nothing to do" ;;

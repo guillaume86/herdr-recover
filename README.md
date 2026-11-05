@@ -111,8 +111,10 @@ Sessions already running are remembered from their next start (or `/resume`).
      (`~/.claude/sessions/<pid>.json`) and reads the flags from `/proc` on Linux (on Windows
      the mod reads them once from the agent's command line). It skips `claude -p` runs an
      agent starts as a tool, and sub-agents. At `SessionEnd`, `/exit`, Ctrl+C and `/logout`
-     forget the session; a signal (`other`) keeps it. `SessionStart` runs with
-     `"async": true`, so Claude doesn't wait for it.
+     mark the session ended (`recover.ended=<id>`, which the mod then forgets); a signal
+     (`other`) keeps it. That costs one `hc` call and no other process: Claude Code gives
+     plugin `SessionEnd` hooks 1.5 s in all, and under Git Bash a process can take a third
+     of it. `SessionStart` runs with `"async": true`, so Claude doesn't wait for it.
    - **Codex**: a plugin whose `SessionStart` hook runs the same script. Codex runs hooks
      in a background server its terminals share (see [Limits](#limits)), so the hook only
      labels a terminal where Codex is the program in front and isn't resuming another
