@@ -1,7 +1,9 @@
-# v2 handoff: verify on Windows
+# v2 handoff: verify on Windows and WSL, finish, merge
 
-Branch `v2`. Written 2026-11-05 on msi-gui-ubuntu (Linux) to be picked up on a Windows host.
-Delete this file before merging.
+Branch `v2`. Written 2026-11-05 on msi-gui-ubuntu (Linux) for a session on the owner's Windows
+laptop, which runs the Herdr app (herdr-app, with the v1 `recover` mod) and its own herdr-core,
+and has WSL. Goal: Windows and WSL tests, review, finish, merge into `main`. Delete this file in
+the merge.
 
 ## What v2 is
 
@@ -42,6 +44,16 @@ End to end against a **separate** hc core (recipe in README › Development), wi
 
 ## Verify on Windows (Git Bash + PowerShell)
 
+Safety first: the core rereads config.toml live, so a broken entry stops **new** terminals from
+opening; existing ones keep running. Keep one terminal open. To undo:
+`sh install.sh --uninstall` from Git Bash (puts back the `shell` there was), or delete the two
+`# herdr-recover` lines from `%APPDATA%\herdr-core\config.toml`. Before step 1 you can try the
+entry by hand: run the `pwsh.exe … -Command "…"` from step 2 in an existing terminal and check
+PowerShell starts and stays.
+
+0. Update the app mod: replace the app's `mods/recover` folder with this branch's (delete the
+   old one first, so removed files go), run `herdr-app check <folder>`, keep the layout block
+   and the ctrl-shift-r key (README › The Herdr app). Ask the owner before removing other mods.
 1. In Git Bash: `git clone … && cd herdr-recover && git switch v2`, then
    `RECOVER_SOURCE=$PWD sh install.sh` and `sh install.sh --doctor`.
 2. Open `%APPDATA%\herdr-core\config.toml`. Expect a `# herdr-recover was:` line if a
@@ -79,6 +91,38 @@ Things that may go wrong there (unverified assumptions):
   for telling a quit apart).
 - Also run `herdr-app check mods/recover` (the mod changed: auto-resume removed, a
   "resumes" mark per machine in the dialog's setup line). It was only syntax-checked.
+
+## Test in WSL
+
+For each distro whose terminals the app uses (it is a linked hc machine, Linux path):
+1. Clone or update, `git switch v2`, `npm test` (there `/bin/sh` is dash, and `/proc` exists:
+   the hook's flag reading and the awk variants run for real). `sh test/hook.test.sh` too.
+2. `sh install.sh`, `sh install.sh --doctor`; open a new terminal on that machine from the app:
+   it must open into the usual shell (argv `~/.local/bin/herdr-recover-shell`, foreground the shell).
+3. Real loss with a real agent: start `claude` (and `opencode` if present) in a terminal there,
+   send a prompt so the session exists, then `wsl --shutdown` from Windows (the README's
+   untested case) or `hc server stop` inside the distro, then reopen the app. Expect each
+   session typed back ~1.5 s after its new shell, on the same session, with its flags.
+4. Quit an agent by hand (`/exit`, Ctrl+C), lose the terminal again: expect no resume, labels gone.
+5. Old integrations there: OpenCode 1's plugin file under OpenCode 2 (the installer removes it),
+   legacy Herdr TUI leftovers (herdr-agent-state hooks, herdr-tui-session / herdr-opencode):
+   list them and ask the owner before deleting.
+
+## Finish and merge
+
+- Review the whole diff `main..v2` (correctness first: recover-shell.sh's job, install.sh's
+  config editing on Windows and Linux, the two plugins). Fix what you find, with tests.
+- Settle the open questions below with the owner.
+- README: replace the "Status" paragraph with what was actually tested (Windows, WSL, Linux);
+  update the agent table's Windows column; bump `package.json` (owner's call on the number).
+- `npm test` green on Windows (Git Bash) and in WSL.
+- Delete this file, merge `v2` into `main` (ask the owner: fast-forward or a merge commit),
+  push `main`, delete the `v2` branch on GitHub if the owner agrees.
+- After the merge, on every machine (the laptop, each WSL distro, and through
+  `hc exec --on <machine>` msi-gui-ubuntu, gui-desktop-26-ubuntu, nas): switch the clone to
+  `main`, `git pull`, `sh install.sh`, `sh install.sh --doctor`, and
+  `claude plugin marketplace update herdr-recover && claude plugin update herdr-recover@herdr-recover`
+  so Claude Code's plugin comes from the merged main.
 
 ## Open questions for the owner
 
