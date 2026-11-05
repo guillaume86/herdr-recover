@@ -15,7 +15,8 @@ test("agents are known by their command, with or without a path or .exe", () => 
   assert.equal(agentOf(["C:\\Users\\u\\.local\\bin\\claude.exe"]), "claude");
   assert.equal(agentOf(["bash"]), null);
   assert.equal(agentForApp("claude-code"), "claude");
-  assert.equal(agentForApp("pi"), null);
+  assert.equal(agentForApp("pi"), "pi");
+  assert.equal(agentForApp("aider"), null);
 });
 
 test("only the flags a resume accepts are carried, with their values", () => {
@@ -130,9 +131,38 @@ test("Windows: which terminals run a Windows shell, and tasklist's pids", () => 
   assert.ok(isWindowsShell(["pwsh.exe", "-NoExit"]));
   assert.ok(isWindowsShell(["cmd.exe"]));
   assert.ok(!isWindowsShell(["/bin/bash"]));
-  const out = '"claude.exe","33376","Console","1","7.776 Ko"\r\n"claude.exe","63156","Console","1","468.972 Ko"\r\n';
-  assert.deepEqual([...parseTasklist(out)], [33376, 63156]);
+  const out = '"claude.exe","33376","Console","1","7.776 Ko"\r\n"Claude.exe","63156","Console","1","468.972 Ko"\r\n"pi.exe","70","Console","1","1 Ko"\r\n';
+  assert.deepEqual([...parseTasklist(out)], [[33376, "claude.exe"], [63156, "claude.exe"], [70, "pi.exe"]]);
   assert.equal(parseTasklist("INFO: No tasks are running which match the specified criteria.").size, 0);
+});
+
+test("Codex, OpenCode and Pi: known by their command, resumed their own way, with their flags", () => {
+  assert.equal(agentOf(["codex", "-m", "gpt-5.5"]), "codex");
+  assert.equal(agentOf(["opencode"]), "opencode");
+  assert.equal(agentOf(["pi", "--model", "x"]), "pi");
+  const at = (agent, flags = "[]") => rec({ agent, cwd: "/w", flags });
+  assert.equal(resumeLine(at("codex", '["-m","gpt-5.5"]'), "posix"), `cd -- /w && codex resume -m gpt-5.5 ${ID}`);
+  assert.equal(resumeLine(at("opencode", '["--model","opencode/big-pickle"]'), "posix"), `cd -- /w && opencode --model opencode/big-pickle --session ${ID}`);
+  assert.equal(resumeLine(at("pi"), "pwsh"), `Set-Location -LiteralPath '/w'; & 'pi' '--session' '${ID}'`);
+  // A resumed Codex's command line names the subcommand and the session: neither is carried.
+  assert.deepEqual(carriedFlags("codex", ["codex", "resume", "-m", "gpt-5.5", "--yolo", "--search", ID]), ["-m", "gpt-5.5", "--search"]);
+  assert.deepEqual(carriedFlags("pi", ["pi", "--model", "claude-haiku-4-5", "--thinking", "high", "--session", ID]), ["--model", "claude-haiku-4-5", "--thinking", "high"]);
+  assert.equal(readRecord(labels({ session: ID, pid: 42 })).pid, 42);
+});
+
+test("decide: an agent with no end hook, seen gone from its shell, was quit", () => {
+  const now = 1_000_000;
+  const codex = rec({ agent: "codex" });
+  assert.equal(decide(codex, { state: "interrupted", now, goneSince: now - 10_000 }), "forget");
+  assert.equal(decide(codex, { state: "interrupted", now, goneSince: now - 2_000 }), "wait", "seen gone only just now");
+  assert.equal(decide(codex, { state: "interrupted", now }), "wait", "never seen gone");
+  assert.equal(decide(codex, { state: "lost", now, goneSince: now - 10_000 }), "resume", "a new shell: a restart, not a quit");
+  // Claude Code's SessionEnd hook tells a quit: a crash there stays, for the dialog.
+  assert.equal(decide(rec(), { state: "interrupted", now, goneSince: now - 10_000 }), "wait");
+  // A resume on its way isn't a quit; one that came up and then went is.
+  assert.equal(decide(rec({ agent: "codex", resumed: now - 5_000 }), { state: "interrupted", now, goneSince: now - 10_000 }), "wait");
+  assert.equal(decide(rec({ agent: "codex", resumed: now - 90_000 }), { state: "interrupted", now, cameBack: true, goneSince: now - 10_000 }), "forget");
+  assert.equal(decide(rec({ agent: "codex", resumed: now - 90_000 }), { state: "interrupted", now, cameBack: false, goneSince: now - 10_000 }), "fail");
 });
 
 test("addresses split into machine and id", () => {

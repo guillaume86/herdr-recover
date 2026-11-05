@@ -1,11 +1,15 @@
 #!/bin/sh
 # herdr-recover: remember the agent session on its herdr-core terminal.
 #
-# Claude Code runs this at SessionStart and SessionEnd (hooks run through
-# sh, or Git Bash on Windows), with the event as JSON on stdin. It labels the
-# terminal the agent runs in (`hc label $HC_TERMINAL_ID recover.*`), so the
-# Recover mod in the Herdr app can bring the session back after a restart or
-# a reboot. It needs only sh, sed and hc: no node, python or jq.
+#   sh recover-hook.sh claude   Claude Code's SessionStart and SessionEnd hook
+#   sh recover-hook.sh codex    Codex's SessionStart hook
+#
+# The agent runs it with the event as JSON on stdin (Claude Code through sh, or
+# Git Bash on Windows). It labels the terminal the agent runs in
+# (`hc label $HC_TERMINAL_ID recover.*`), so the Recover mod in the Herdr app can
+# bring the session back after a restart or a reboot. It needs only sh, sed and
+# hc: no node, python or jq. The agent plugins (.claude-plugin, .codex-plugin)
+# point their hooks here.
 #
 # Starting a process costs a lot under Git Bash (hundreds of ms when antivirus
 # looks at each one), so the JSON is read with one sed per document and the
@@ -16,6 +20,8 @@
 
 say() { [ -n "${RECOVER_DEBUG:-}" ] && printf 'recover: %s\n' "$*" >&2; return 0; }
 
+agent=${1:-claude}
+case $agent in claude | codex) ;; *) say "unknown agent $agent"; exit 0 ;; esac
 [ -n "${HC_TERMINAL_ID:-}" ] || exit 0
 input=$(cat 2>/dev/null) || exit 0
 hc="${RECOVER_HC:-hc}"
@@ -61,7 +67,7 @@ unescape() {
   printf '%s' "$out$v"
 }
 
-event= session= agent_id= cwd= reason=
+event= session= agent_id= cwd= reason= transcript=
 while IFS= read -r line; do
   case $line in
     e=*) event=${line#e=} ;;
@@ -69,9 +75,10 @@ while IFS= read -r line; do
     a=*) agent_id=${line#a=} ;;
     c=*) cwd=${line#c=} ;;
     r=*) reason=${line#r=} ;;
+    t=*) transcript=${line#t=} ;;
   esac
 done <<EOF
-$(printf '%s' "$input" | fields e:hook_event_name s:session_id a:agent_id c:cwd r:reason)
+$(printf '%s' "$input" | fields e:hook_event_name s:session_id a:agent_id c:cwd r:reason t:transcript_path)
 EOF
 
 case "$session" in
@@ -80,14 +87,17 @@ esac
 # A sub-agent's session belongs to its parent's terminal record, not in place of it.
 [ -z "$agent_id" ] || { say "a sub-agent"; exit 0; }
 
-# What the terminal remembers now, and its own program (its shell): the record names it,
-# so a new shell after a restart tells the mod the session was lost. hc sorts its keys,
-# so the top-level "pid" is the one right after "parent" (`foreground` has its own).
-old= shell_pid=
+# What the terminal remembers now, its own program (its shell), and the program in front:
+# the record names the shell, so a new shell after a restart tells the mod the session was
+# lost. hc sorts its keys, so the top-level "pid" is the one right after "parent"
+# (`foreground` has its own), and a foreground's "argv" comes first.
+old= shell_pid= front= front_argv=
 while IFS= read -r line; do
   case $line in
     o=*) old=${line#o=} ;;
     p=*) shell_pid=${line#p=} ;;
+    f=*) front=${line#f=} ;;
+    v=*) front_argv=${line#v=} ;;
   esac
 done <<EOF
 $("$hc" get "$HC_TERMINAL_ID" --json 2>/dev/null | sed -n '$!{
@@ -99,15 +109,33 @@ s/\n//g
 h
 s/.*"recover\.session"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/o=\1/p
 g
-s/.*"parent"[[:space:]]*:[[:space:]]*\(null\|"[^"]*"\)[[:space:]]*,[[:space:]]*"pid"[[:space:]]*:[[:space:]]*\([0-9]*\).*/p=\2/p')
+s/.*"parent"[[:space:]]*:[[:space:]]*\(null\|"[^"]*"\)[[:space:]]*,[[:space:]]*"pid"[[:space:]]*:[[:space:]]*\([0-9]*\).*/p=\2/p
+g
+s/.*"foreground"[[:space:]]*:[[:space:]]*{[^}]*"name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/f=\1/p
+g
+s/.*"foreground"[[:space:]]*:[[:space:]]*{[[:space:]]*"argv"[[:space:]]*:[[:space:]]*\(\[[^]]*\]\).*/v=\1/p')
 EOF
 [ -n "$shell_pid" ] || { say "no terminal pid from hc get"; exit 0; }
 
-config="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
-sessions="$config/sessions"
+# Labels the terminal with this session: a new one starts clean, the same one starting
+# again (a resume, a compaction) keeps its marks. $1 = config folder, $2 = session file,
+# $3 = flags as a JSON array.
+record() {
+  cwd=$(unescape "$cwd")
+  if [ "$old" = "$session" ]; then
+    "$hc" label "$HC_TERMINAL_ID" "recover.cwd=$cwd" "recover.shell=$shell_pid" "recover.failed=" ${2:+"recover.file=$2"} >/dev/null 2>&1
+  else
+    now="${EPOCHSECONDS:-$(date +%s)}000"
+    "$hc" label "$HC_TERMINAL_ID" "recover.agent=$agent" "recover.session=$session" "recover.cwd=$cwd" \
+      "recover.flags=$3" "recover.dir=$1" "recover.shell=$shell_pid" "recover.file=$2" "recover.pid=" \
+      "recover.at=$now" "recover.resumed=" "recover.failed=" >/dev/null 2>&1
+  fi
+  say "recorded $agent $session in $HC_TERMINAL_ID (shell $shell_pid)"
+}
 
-case "$event" in
-  SessionStart)
+case "$agent:$event" in
+  claude:SessionStart)
+    sessions="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/sessions"
     # Claude Code keeps sessions/<pid>.json for each interactive process. The one naming
     # this session, and its kind, in one sed over them all (F prints the file's name).
     mine= kind=
@@ -128,7 +156,6 @@ EOF
       sed -n "/\"sessionId\":\"$old\"/{/\"kind\":\"interactive\"/q1}" "$sessions"/*.json 2>/dev/null
       [ $? -eq 1 ] && { say "nested under live session $old"; exit 0; }
     fi
-    cwd=$(unescape "$cwd")
     # The session file, for the mod to tell a running session from a lost one by reading it
     # (hc can't see a child program on Windows), in the app's own path form there: /c/x is C:/x.
     file=$mine
@@ -172,28 +199,39 @@ EOF
         [ -n "$pid" ] || break
       done
     fi
-    now="${EPOCHSECONDS:-$(date +%s)}000"
-    # The same session starting again (a resume, a compaction) keeps its marks; a new one starts clean.
-    if [ "$old" = "$session" ]; then
-      "$hc" label "$HC_TERMINAL_ID" "recover.cwd=$cwd" "recover.shell=$shell_pid" "recover.failed=" ${file:+"recover.file=$file"} >/dev/null 2>&1
-    else
-      "$hc" label "$HC_TERMINAL_ID" "recover.agent=claude" "recover.session=$session" "recover.cwd=$cwd" \
-        "recover.flags=$flags" "recover.dir=${CLAUDE_CONFIG_DIR:-}" "recover.shell=$shell_pid" "recover.file=$file" \
-        "recover.at=$now" "recover.resumed=" "recover.failed=" >/dev/null 2>&1
-    fi
-    say "recorded $session in $HC_TERMINAL_ID (shell $shell_pid)"
+    record "${CLAUDE_CONFIG_DIR:-}" "$file" "$flags"
     ;;
-  SessionEnd)
+  codex:SessionStart)
+    # Codex runs its hooks in a background server that all its terminals share, with the
+    # environment of the terminal that started it, so HC_TERMINAL_ID can name another
+    # Codex terminal (the Herdr TUI's integration has the same gap; `codex --no-daemon`
+    # has none). Two checks keep that from overwriting a record: Codex must be the program
+    # in front there, and not one resuming another session (several terminals resuming
+    # after a reboot).
+    [ "${front##*/}" = codex ] || { say "codex isn't in front in $HC_TERMINAL_ID"; exit 0; }
+    named=$(printf '%s' "$front_argv" | grep -o -E '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}')
+    if [ -n "$named" ] && ! printf '%s\n' "$named" | grep -qxF "$session"; then
+      say "$HC_TERMINAL_ID resumed another session"; exit 0
+    fi
+    # A sub-agent's thread, or one Codex started for itself: its transcript says who started it.
+    if [ -n "$transcript" ] && [ -r "$transcript" ]; then
+      by=$(sed -n '1{s/.*"thread_source"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p;q;}' "$transcript" 2>/dev/null)
+      [ -z "$by" ] || [ "$by" = user ] || { say "a $by thread"; exit 0; }
+    fi
+    # Flags: the mod reads them from the program in front, where hc shows its command line.
+    record "${CODEX_HOME:-}" "" "[]"
+    ;;
+  claude:SessionEnd)
     [ "$old" = "$session" ] || { say "not the remembered session"; exit 0; }
     case "$reason" in
       clear | resume) say "ignored ($reason)" ;;        # the same process starts another session
       other) say "kept (a signal)" ;;                   # a crash, a kill, a shutdown: worth bringing back
       *)
         "$hc" label "$HC_TERMINAL_ID" recover.agent= recover.session= recover.cwd= recover.flags= \
-          recover.dir= recover.file= recover.shell= recover.at= recover.resumed= recover.failed= >/dev/null 2>&1
+          recover.dir= recover.file= recover.pid= recover.shell= recover.at= recover.resumed= recover.failed= >/dev/null 2>&1
         say "forgot ($reason)" ;;
     esac
     ;;
-  *) say "event $event: nothing to do" ;;
+  *) say "$agent $event: nothing to do" ;;
 esac
 exit 0

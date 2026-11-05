@@ -53,7 +53,7 @@ const isWindows = () => { try { return appWindow()?.platform === "windows"; } ca
  * shell was first seen (`seen`), which resumes are in flight (`sending`), when each agent
  * was last seen live, and the list the bar and the dialog draw.
  */
-function mem() { return { seen: {}, sending: {}, live: {}, flags: {}, entries: [], hooks: {}, at: 0, ...(shared(STATE_KEY) ?? {}) }; }
+function mem() { return { seen: {}, sending: {}, live: {}, gone: {}, flags: {}, entries: [], hooks: {}, at: 0, ...(shared(STATE_KEY) ?? {}) }; }
 // Setting shared state redraws every mod in the window: only write what changed.
 function remember(m) {
   const before = JSON.stringify(shared(STATE_KEY) ?? null);
@@ -129,12 +129,12 @@ async function sessionsOn(on, dirs) {
   return r.code === 0 || r.stdout ? parseSessionFiles(r.stdout) : null;
 }
 
-/** The pids of the agent processes running on a Windows machine (one tasklist, cheaper than PowerShell). */
-async function runningAgents(on) {
+/** The processes running on a Windows machine, pid → image (one tasklist, cheaper than PowerShell). */
+async function runningPids(on) {
   try {
-    const r = await exec("tasklist", ["/FO", "CSV", "/NH", "/FI", "IMAGENAME eq claude.exe"], { on });
+    const r = await exec("tasklist", ["/FO", "CSV", "/NH"], { on });
     return parseTasklist(r.stdout);
-  } catch { return new Set(); }
+  } catch { return new Map(); }
 }
 
 /** The command line of a Windows process, for the flags the hook couldn't read there. */
@@ -145,12 +145,28 @@ async function winCommandLine(pid) {
   } catch { return ""; }
 }
 
-/** Whether Recover's hook is in a machine's Claude Code settings. Null when unknown. */
-async function hookInstalled(on) {
+// Which agents a machine has, and whether Recover is set up for each: `agent=1` or `agent=0`
+// lines, one per agent whose config folder exists. Claude Code's plugin (or an older install's
+// hook) shows in its settings, Codex's in its config, Pi's package in its settings, and the
+// OpenCode plugin is a file.
+const INTEGRATIONS = `
+has() { grep -qs ${HOOK_MARK} "$@" && echo 1 || echo 0; }
+d=\${CLAUDE_CONFIG_DIR:-$HOME/.claude}; [ -d "$d" ] && echo "claude=$(has "$d/settings.json")"
+d=\${CODEX_HOME:-$HOME/.codex}; [ -d "$d" ] && echo "codex=$(has "$d/config.toml" "$d/hooks.json")"
+d=\${OPENCODE_CONFIG_DIR:-\${XDG_CONFIG_HOME:-$HOME/.config}/opencode}; [ -d "$d" ] && echo "opencode=$([ -f "$d/plugins/${HOOK_MARK}.js" ] && echo 1 || echo 0)"
+d=\${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}; [ -d "$d" ] && echo "pi=$(has "$d/settings.json")"
+true`;
+
+/** { agent: true|false } for the agents a machine has. Null when unknown. */
+async function integrations(on) {
   try {
-    if (!on) return (await readTextFile(`${home()}/.claude/settings.json`))?.includes(HOOK_MARK) ?? false;
-    const r = await exec("sh", ["-c", 'cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json" 2>/dev/null'], { on });
-    return r.stdout.includes(HOOK_MARK);
+    if (!on && isWindows()) {
+      // Here only Claude Code: Recover's other integrations are tested on Linux and macOS.
+      const text = await readTextFile(`${home()}/.claude/settings.json`).catch(() => null);
+      return text === null ? {} : { claude: text.includes(HOOK_MARK) };
+    }
+    const r = await exec("sh", ["-c", INTEGRATIONS], { on });
+    return Object.fromEntries([...r.stdout.matchAll(/^(\w+)=([01])$/gm)].filter((m) => AGENTS[m[1]]).map((m) => [m[1], m[2] === "1"]));
   } catch { return null; }
 }
 
@@ -177,6 +193,8 @@ async function scan({ setup = false } = {}) {
     const winFile = new Map(await Promise.all(asked.map(async (t) => {
       const rec = readRecord(t.labels);
       const on = splitAddress(t.address).on;
+      // Other agents' plugins name their process: its pid running is enough.
+      if (rec.agent !== "claude") return [t.address, null];
       if (rec.file) {
         const text = await readTextFile(rec.file, { on }).catch(() => null);
         return [t.address, parseSessionFiles(text).find((s) => s.session === rec.session) ?? null];
@@ -185,7 +203,7 @@ async function scan({ setup = false } = {}) {
       return [t.address, (await sessionsOn(on, rec.dir ? [rec.dir] : []))?.find((s) => s.session === rec.session) ?? null];
     })));
     const machinesAsked = [...new Set(asked.map((t) => splitAddress(t.address).on))];
-    const agentPids = new Map(await Promise.all(machinesAsked.map(async (on) => [on, await runningAgents(on)])));
+    const agentPids = new Map(await Promise.all(machinesAsked.map(async (on) => [on, await runningPids(on)])));
     const now = Date.now();
     // The quick pass writes this memory while the checks above ran: start from its version.
     m = { ...mem(), busy: m.busy };
@@ -196,12 +214,19 @@ async function scan({ setup = false } = {}) {
       const { on, id } = splitAddress(t.address);
       const fg = t.foreground;
       const file = winFile.get(t.address) ?? null;
-      const live = isWindowsShell(t.argv ?? [])
-        ? Boolean(file?.pid && agentPids.get(on)?.has(file.pid))
+      const windows = isWindowsShell(t.argv ?? []);
+      const pids = agentPids.get(on);
+      const live = windows
+        ? Boolean(rec.agent === "claude" ? file?.pid && pids?.get(file.pid) === AGENTS.claude.image : rec.pid && pids?.has(rec.pid))
         : Boolean(fg && fg.pid !== t.pid && agentOf(fg.argv ?? [fg.name]) === rec.agent);
       const pid = t.pid ?? null;
       const state = stateOf(rec, { live, pid });
       if (live) m.live[t.address] = now;
+      // When the agent was first seen gone from the shell it ran under, for this session.
+      const gone = m.gone[t.address];
+      if (state === "interrupted") {
+        if (!gone || gone.session !== rec.session || gone.pid !== pid) m.gone[t.address] = { session: rec.session, pid, at: now };
+      } else delete m.gone[t.address];
       // It came up after all (a slow start marked failed): the mark goes, without waiting for the hook.
       if (live && rec.failed && rec.shell === pid) {
         await hc(["label", t.address, ...labelArgs({ failed: null })]).catch(() => null);
@@ -213,10 +238,18 @@ async function scan({ setup = false } = {}) {
         shell: shellKind(t.argv ?? []),
         busy: Boolean(fg && fg.pid && pid && fg.pid !== pid && !live),
       };
-      // Flags the hook couldn't read (Windows has no /proc): once, from the agent's command line.
-      // Its pid is in its session file's name (sessions/<pid>.json).
-      const agentPid = file?.pid ?? Number(/(\d+)\.json$/.exec(rec.file ?? "")?.[1] ?? 0);
-      if (live && agentPid && !rec.flags.length && !on && isWindows() && m.flags[rec.session] !== true) {
+      // Flags the hook didn't record: where hc shows the agent in front (Linux, macOS), from its
+      // command line there, which costs nothing. In a Windows shell, once, from the agent's
+      // process (Claude Code: its pid is in its session file's name, sessions/<pid>.json).
+      if (live && !rec.flags.length && !windows && fg?.argv?.length) {
+        const flags = carriedFlags(rec.agent, fg.argv);
+        if (flags.length) {
+          await hc(["label", t.address, ...labelArgs({ flags: JSON.stringify(flags) })]).catch(() => null);
+          rec.flags = flags;
+        }
+      }
+      const agentPid = rec.pid ?? file?.pid ?? Number(/(\d+)\.json$/.exec(rec.file ?? "")?.[1] ?? 0);
+      if (live && agentPid && !rec.flags.length && windows && !on && isWindows() && m.flags[rec.session] !== true) {
         m.flags[rec.session] = true;
         const argv = winArgv(await winCommandLine(agentPid));
         const flags = carriedFlags(rec.agent, argv);
@@ -225,8 +258,14 @@ async function scan({ setup = false } = {}) {
       // Seen live since the last resume: a later absence is a quit, not a failed resume.
       // Unknown when the mod never saw this terminal live (an app restart since).
       const cameBack = rec.resumed && m.live[t.address] ? m.live[t.address] > rec.resumed : null;
-      // Resumes are the quick pass's: this one only notices those that never came up.
-      const action = decide(rec, { state, cameBack, now });
+      // Resumes are the quick pass's: this one only notices those that never came up, and
+      // the sessions of agents with no end hook that the person quit.
+      const action = decide(rec, { state, cameBack, now, goneSince: m.gone[t.address]?.at ?? null });
+      if (action === "forget") {
+        await hc(["label", t.address, ...clearArgs()]).catch(() => null);
+        delete m.gone[t.address];
+        continue;
+      }
       if (action === "fail") {
         await hc(["label", t.address, ...labelArgs({ failed: now })]);
         entry.state = "failed";
@@ -237,12 +276,14 @@ async function scan({ setup = false } = {}) {
     }
     m.entries = entries;
     m.at = now;
+    const known = new Set(infos.map((t) => t.address));
+    for (const address of Object.keys(m.gone)) if (!known.has(address)) delete m.gone[address];
     if (setup) {
       // This computer and every machine the app reaches now, plus any a record is on.
       let reachable = [];
       try { reachable = machines().filter((x) => x.name && x.layout !== "unavailable").map((x) => x.name); } catch { /* none */ }
       const places = [...new Set([null, ...reachable, ...infos.map((t) => splitAddress(t.address).on)])];
-      m.hooks = Object.fromEntries(await Promise.all(places.map(async (on) => [on ?? "", await hookInstalled(on)])));
+      m.hooks = Object.fromEntries(await Promise.all(places.map(async (on) => [on ?? "", await integrations(on)])));
     }
   } finally {
     // The quick pass's claims and sightings are its own: keep what it wrote meanwhile.
@@ -461,17 +502,26 @@ export default class Recover extends View {
 
   setupLine(t) {
     const hooks = mem().hooks ?? {};
-    const names = Object.keys(hooks);
-    if (!names.length) return div();
-    const part = (name, on) => h_flex().gap(4).text_color(on ? t.muted : on === null ? t.dim : t.ansi1)
-      .child(div().text_color(on ? t.ansi2 : on === null ? t.dim : t.ansi1).child(on ? "✓" : on === null ? "?" : "✕"))
-      .child(name);
-    const missing = names.filter((k) => hooks[k] === false);
+    const places = Object.keys(hooks);
+    if (!places.length) return div();
+    const mark = (ok) => div().text_color(ok ? t.ansi2 : ok === null ? t.dim : t.ansi1).child(ok ? "✓" : ok === null ? "?" : "✕");
+    const missing = [];
+    const line = (place) => {
+      const name = place || "this computer";
+      const agents = hooks[place];
+      const row = h_flex().gap(8).items_center().flex_wrap().child(div().text_color(t.muted).child(`${name}:`));
+      if (agents === null || typeof agents !== "object") return row.child(mark(null));
+      const keys = Object.keys(agents);
+      if (!keys.length) return row.child(div().text_color(t.dim).child("no agent here"));
+      for (const k of keys) if (!agents[k]) missing.push(`${AGENTS[k]?.name ?? k} on ${name}`);
+      return row.children(keys.map((k) => h_flex().gap(4).items_center().text_color(agents[k] ? t.muted : t.ansi1)
+        .child(mark(agents[k])).child(AGENTS[k]?.name ?? k)));
+    };
+    const rows = places.map(line);
     return v_flex().gap(6).text_size(11)
-      .child(h_flex().gap(10).items_center()
-        .children(names.map((k) => part(`${k || "this computer"} hook`, hooks[k]))))
+      .children(rows)
       .when(missing.length > 0, (el) => el.child(div().text_color(t.dim)
-        .child(`Install the hook on ${missing.map((k) => k || "this computer").join(", ")}: in a terminal there, sh install.sh from a copy of this repository.`)));
+        .child(`Not set up: ${missing.join(", ")}. In a terminal there, sh install.sh from a clone of guillaume86/herdr-recover.`)));
   }
 
   renderDialog() {

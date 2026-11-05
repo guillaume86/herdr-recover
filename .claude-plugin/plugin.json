@@ -1,0 +1,18 @@
+{
+  "name": "herdr-recover",
+  "displayName": "Herdr Recover",
+  "description": "Remembers each Claude Code session on its Herdr terminal, so the Recover mod in the Herdr app can resume it after a restart or a reboot.",
+  "author": { "name": "guillaume86", "url": "https://github.com/guillaume86" },
+  "homepage": "https://github.com/guillaume86/herdr-recover",
+  "repository": "https://github.com/guillaume86/herdr-recover",
+  "license": "MIT",
+  "keywords": ["herdr", "resume", "restart", "terminal"],
+  "hooks": {
+    "SessionStart": [
+      { "hooks": [{ "type": "command", "command": "sh \"${CLAUDE_PLUGIN_ROOT}/hook/recover-hook.sh\" claude", "async": true, "timeout": 10 }] }
+    ],
+    "SessionEnd": [
+      { "hooks": [{ "type": "command", "command": "sh \"${CLAUDE_PLUGIN_ROOT}/hook/recover-hook.sh\" claude", "timeout": 10 }] }
+    ]
+  }
+}

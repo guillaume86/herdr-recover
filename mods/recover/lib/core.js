@@ -8,10 +8,17 @@
 // kept across core restarts and reboots and go away with the terminal.
 
 export const PREFIX = "recover.";
-export const KEYS = ["agent", "session", "cwd", "flags", "dir", "file", "shell", "at", "resumed", "failed", "auto"];
+export const KEYS = ["agent", "session", "cwd", "flags", "dir", "file", "pid", "shell", "at", "resumed", "failed", "auto"];
 
-// The flag table comes from herdr-revive (MIT, github.com/dmazlum/herdr-revive):
-// the launch flags a resume should get back, with how many values each takes.
+// What Recover knows of each agent: how it resumes a session, the launch flags a
+// resume should get back (with how many values each takes), and how a session the
+// person quit is told from one a restart took.
+// - Claude Code's SessionEnd hook says why a session ended (`end`).
+// - The others have no such hook: a session whose agent the mod sees gone from its
+//   terminal, under the same shell, was quit (`forgetOnExit`). One that ended while the
+//   app was closed is resumed after a later restart.
+// Claude Code's flag table comes from herdr-revive (MIT, github.com/dmazlum/herdr-revive);
+// the resume commands match the Herdr TUI's (src/agent_resume.rs in herdrdev/herdr).
 export const AGENTS = {
   claude: {
     name: "Claude Code",
@@ -33,6 +40,37 @@ export const AGENTS = {
     // SessionEnd reasons: `clear` and `resume` start another session in the same process (its
     // SessionStart records it); `other` is a signal (keep the record); anything else is the person.
     end: (reason) => (reason === "clear" || reason === "resume" ? "ignore" : reason === "other" ? "keep" : "forget"),
+    // Windows: the image a live agent runs as (tasklist).
+    image: "claude.exe",
+  },
+  codex: {
+    name: "Codex",
+    bin: "codex",
+    apps: ["codex"],
+    resume: (id, flags) => ["codex", "resume", ...flags, id],
+    carry: {
+      "--model": 1, "-m": 1, "--profile": 1, "-p": 1, "--sandbox": 1, "-s": 1, "--ask-for-approval": 1, "-a": 1,
+      "--dangerously-bypass-approvals-and-sandbox": 0, "--approve-for-me": 0, "--search": 0, "--add-dir": 1,
+      "--config": 1, "-c": 1, "--enable": 1, "--disable": 1, "--oss": 0, "--local-provider": 1, "--no-daemon": 0,
+    },
+    dirVar: "CODEX_HOME",
+    forgetOnExit: true,
+  },
+  opencode: {
+    name: "OpenCode",
+    bin: "opencode",
+    apps: ["opencode"],
+    resume: (id, flags) => ["opencode", ...flags, "--session", id],
+    carry: { "--model": 1, "-m": 1, "--agent": 1, "--auto": 0 },
+    forgetOnExit: true,
+  },
+  pi: {
+    name: "Pi",
+    bin: "pi",
+    apps: ["pi"],
+    resume: (id, flags) => ["pi", ...flags, "--session", id],
+    carry: { "--provider": 1, "--model": 1, "--thinking": 1, "--models": 1, "--approve": 0, "-a": 0 },
+    forgetOnExit: true,
   },
 };
 
@@ -94,6 +132,8 @@ export function readRecord(labels) {
     dir: get("dir") || null,
     // The agent's own session file (Claude Code: sessions/<pid>.json): there while it runs.
     file: get("file") || null,
+    // The agent's process, where its plugin knows it (OpenCode, Pi): Windows liveness.
+    pid: num(get("pid")),
     shell: num(get("shell")),
     at: num(get("at")),
     resumed: num(get("resumed")),
@@ -133,12 +173,12 @@ export function stateOf(rec, { live, pid }) {
 /** A terminal running a Windows shell, where hc can't see the program in front of it. */
 export const isWindowsShell = (argv = []) => shellKind(argv) !== "posix";
 
-/** The pids in `tasklist /FO CSV /NH` output. */
+/** The processes in `tasklist /FO CSV /NH` output: pid → image name, lowercased. */
 export function parseTasklist(text) {
-  const pids = new Set();
+  const pids = new Map();
   for (const line of String(text ?? "").split(/\r?\n/)) {
-    const m = /^"[^"]*","(\d+)"/.exec(line.trim());
-    if (m) pids.add(Number(m[1]));
+    const m = /^"([^"]*)","(\d+)"/.exec(line.trim());
+    if (m) pids.set(Number(m[2]), m[1].toLowerCase());
   }
   return pids;
 }
@@ -147,21 +187,30 @@ export function parseTasklist(text) {
  * What the mod does about a terminal on this tick.
  * - resume   send the resume line: only for a loss (a new shell), when nobody turned it off
  * - fail     a resume that was sent never brought the agent up: mark the record failed
+ * - forget   an agent with no end-of-session hook was quit: drop the record
  * - wait     nothing to do
  * An agent that died under a shell that lived on (interrupted) is never resumed by
- * itself: the person was there to see it. A session they quit is forgotten by the
- * hook's SessionEnd, not here.
+ * itself: the person was there to see it. Claude Code's SessionEnd hook forgets a session
+ * the person quit; for the other agents, the mod does when it has seen the agent gone from
+ * its shell for `goneMs` (`goneSince`: when it first saw that).
  * `cameBack`: whether the mod saw the agent live after `rec.resumed`. Unknown (null)
  * after an app restart: then a resume still waiting after `graceMs`, and younger than
  * `failWithinMs`, counts as failed; an older one as having worked and been quit since.
  */
-export function decide(rec, { state, cameBack = null, now = Date.now(), graceMs = 60_000, failWithinMs = 180_000 }) {
+export function decide(rec, {
+  state, cameBack = null, now = Date.now(), graceMs = 60_000, failWithinMs = 180_000, goneSince = null, goneMs = 8_000,
+}) {
   if (!rec || !AGENTS[rec.agent] || !validId(rec.session)) return "wait";
   if (state === "lost") return rec.auto ? "resume" : "wait";
-  if (state !== "interrupted" || !rec.resumed || cameBack === true) return "wait";
-  const since = now - rec.resumed;
-  if (since < graceMs) return "wait";
-  return cameBack === false || since < failWithinMs ? "fail" : "wait";
+  if (state !== "interrupted") return "wait";
+  // A resume on its way, or one that never brought the agent up.
+  if (rec.resumed && cameBack !== true) {
+    const since = now - rec.resumed;
+    if (since < graceMs) return "wait";
+    if (cameBack === false || since < failWithinMs) return "fail";
+  }
+  if (AGENTS[rec.agent].forgetOnExit && goneSince !== null && now - goneSince >= goneMs) return "forget";
+  return "wait";
 }
 
 /**

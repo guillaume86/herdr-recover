@@ -1,0 +1,14 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "herdr-recover",
+  "description": "Recover: bring back coding-agent sessions that Herdr terminals lost to a restart or a reboot.",
+  "owner": { "name": "guillaume86", "url": "https://github.com/guillaume86" },
+  "plugins": [
+    {
+      "name": "herdr-recover",
+      "source": "./",
+      "description": "Remembers each session on its Herdr terminal, so the Recover mod in the Herdr app can resume it after a restart or a reboot.",
+      "category": "productivity"
+    }
+  ]
+}

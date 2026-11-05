@@ -1,0 +1,13 @@
+{
+  "name": "herdr-recover",
+  "description": "Remembers each Codex session on its Herdr terminal, so the Recover mod in the Herdr app can resume it after a restart or a reboot.",
+  "keywords": ["herdr", "resume", "restart", "terminal"],
+  "hooks": "./hook/codex-hooks.json",
+  "interface": {
+    "displayName": "Herdr Recover",
+    "shortDescription": "Resume Codex sessions Herdr terminals lost to a restart",
+    "developerName": "guillaume86",
+    "category": "Productivity",
+    "websiteURL": "https://github.com/guillaume86/herdr-recover"
+  }
+}

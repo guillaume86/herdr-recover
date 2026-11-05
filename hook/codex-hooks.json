@@ -1,0 +1,8 @@
+{
+  "description": "herdr-recover: remember the session on its Herdr terminal",
+  "hooks": {
+    "SessionStart": [
+      { "hooks": [{ "type": "command", "command": "sh \"${PLUGIN_ROOT}/hook/recover-hook.sh\" codex", "async": true, "timeout": 10 }] }
+    ]
+  }
+}

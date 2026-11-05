@@ -2,7 +2,7 @@
 
 Bring back the coding agent a [Herdr](https://herdr.dev) terminal lost to a restart or a
 reboot, **on this computer and on the machines it is connected to** (a WSL distro, a
-server), from the Herdr app. Windows included.
+server), from the Herdr app. Claude Code, Codex, OpenCode and Pi. Windows included.
 
 Herdr keeps terminals through app restarts and updates. When the machine reboots or
 herdr-core stops, kept terminals come back as fresh shells in the same folder, but the
@@ -10,10 +10,19 @@ agent that ran there is gone. Recover remembers which session each terminal held
 when the terminal comes back as a new shell, types the command that resumes it, with the
 same flags.
 
-Status: **v0.1, Claude Code only.** Tested end to end on Windows + WSL: a WSL terminal whose
-shell was killed (a real hc loss and recovery) came back on its conversation with its
-flags, and on Windows a fresh PowerShell carrying a lost session got it back. Not yet
-tried through a full reboot. See [Limits](#limits).
+Status: **v0.2.** Tested end to end on Windows + WSL. In WSL, Claude Code, Codex, OpenCode
+and Pi terminals whose shells were killed (a real hc loss and recovery) came back on their
+conversations with their flags, and quitting each agent made Recover forget its session.
+On Windows, Claude Code: a fresh PowerShell carrying a lost session got it back, and the
+whole set came back from an `hc server stop`. Not yet tried through a full reboot. See
+[Limits](#limits).
+
+| Agent | Recover comes as | Resumes with | Windows |
+|---|---|---|---|
+| Claude Code | a plugin (hooks) | `claude … --resume <id>` | yes |
+| Codex | a plugin (hook) | `codex resume … <id>` | no |
+| OpenCode | a plugin file | `opencode … --session <id>` | untested |
+| Pi | a package (extension) | `pi … --session <id>` | untested |
 
 ## How it differs from Revive
 
@@ -26,15 +35,15 @@ machine, and it can't work in PowerShell.
 Recover does it the way the Herdr TUI did: **the app types the resume command into the
 restored shell.** Typing into a shell works the same in bash, zsh, fish and PowerShell, on
 every OS, and a shell on another machine is just an `hc send wsl/t3 …` away. What each
-machine needs is only the hook that remembers the session, written in `sh` (Git Bash on
-Windows, which Claude Code runs hooks with), using `sed` and `hc`.
+machine needs is only what tells hc which session a terminal holds: a hook or plugin in
+each agent, installed the agent's own way.
 
 | | Revive | Recover |
 |---|---|---|
 | Who resumes | the shell's rc file | the Herdr app (a mod) |
 | Windows (PowerShell) terminals | no | yes |
 | Remote / WSL terminals | no (my branch: yes, with node there) | yes |
-| Needs on each agent machine | node, an rc block, hooks | `sh`, `hc`, hooks |
+| Needs on each agent machine | node, an rc block, hooks | `hc`, and the agent's plugin |
 | Works while the app is closed | yes | no: it resumes when the app opens |
 
 The last row matters less than it seems: after a reboot the terminals only come back once
@@ -44,19 +53,37 @@ reconnecting.
 ## Install
 
 On **every machine whose agents should come back** (this computer, each WSL distro, each
-server), in a terminal there:
+server), set up each agent you use there. Each one takes Recover its own way, so its own
+commands update and remove it:
+
+```sh
+# Claude Code (in Claude Code itself: /plugin install herdr-recover --marketplace guillaume86/herdr-recover)
+claude plugin marketplace add guillaume86/herdr-recover
+claude plugin install herdr-recover@herdr-recover
+
+# Codex (Linux, macOS): the next time it starts, Codex asks to trust the new hook
+codex plugin marketplace add guillaume86/herdr-recover
+codex plugin add herdr-recover@herdr-recover
+
+# Pi
+pi install git:github.com/guillaume86/herdr-recover
+
+# OpenCode: one plugin file
+mkdir -p ~/.config/opencode/plugins
+curl -fsSL -o ~/.config/opencode/plugins/herdr-recover.js \
+  https://raw.githubusercontent.com/guillaume86/herdr-recover/main/opencode/herdr-recover.js
+```
+
+Or let the installer do it for every agent it finds (on Windows, from Git Bash):
 
 ```sh
 git clone https://github.com/guillaume86/herdr-recover
-sh herdr-recover/install.sh
+sh herdr-recover/install.sh            # --doctor: what is set up; --uninstall: take it out
 ```
 
-On Windows, run it from Git Bash. It copies the hook to
-`~/.local/share/herdr-recover/recover-hook.sh` and adds it to Claude Code's
-`~/.claude/settings.json` as a `SessionStart` and a `SessionEnd` hook, after the hooks
-already there (the original file is kept as `settings.json.recover-backup`). Editing the
-JSON needs `python3` or `jq` at install time; the hook needs neither.
-`sh install.sh --doctor` says what is installed; `--uninstall` takes it out.
+The hooks need `hc` on their PATH (`RECOVER_HC` overrides). Updates: `claude plugin update
+herdr-recover@herdr-recover`, `codex plugin marketplace upgrade herdr-recover`, `pi update`,
+and `install.sh` again for OpenCode.
 
 Then, **on the computer that runs the Herdr app only**:
 
@@ -75,18 +102,26 @@ Sessions already running are remembered from their next start (or `/resume`).
 
 ## How it works
 
-1. **The hook** (`hook/recover-hook.sh`) runs at Claude Code's `SessionStart` in a herdr
-   terminal (`HC_TERMINAL_ID` is set) and labels the terminal: `recover.session`, the
-   folder, the carried flags (read from `/proc` on Linux; on Windows the mod reads them
-   once from the agent's command line), the agent's session file
-   (`~/.claude/sessions/<pid>.json`), and the terminal's own program pid
-   (`recover.shell`). It skips sessions that aren't interactive (a `claude -p` an agent
-   runs as a tool inherits `HC_TERMINAL_ID`) and sub-agents. At `SessionEnd`, `/exit`,
-   Ctrl+C and `/logout` forget the session; a signal (`other`) keeps it; `/clear` and
-   `/resume` leave it to the next `SessionStart`. The `SessionStart` hook is installed
-   with `"async": true`, so Claude doesn't wait for it: under Git Bash every process
-   start can cost hundreds of milliseconds, so the hook parses JSON with one `sed` per
-   document and otherwise uses shell builtins.
+1. **Each agent's integration** labels the terminal it runs in (`HC_TERMINAL_ID` is set
+   there) with `recover.session`, the folder, the carried flags and the terminal's own
+   program pid (`recover.shell`):
+   - **Claude Code**: a plugin whose `SessionStart` and `SessionEnd` hooks run
+     [`hook/recover-hook.sh`](hook/recover-hook.sh) (`sh`, Git Bash on Windows, with `sed`
+     and `hc` only). It also records the agent's session file
+     (`~/.claude/sessions/<pid>.json`) and reads the flags from `/proc` on Linux (on Windows
+     the mod reads them once from the agent's command line). It skips `claude -p` runs an
+     agent starts as a tool, and sub-agents. At `SessionEnd`, `/exit`, Ctrl+C and `/logout`
+     forget the session; a signal (`other`) keeps it. `SessionStart` runs with
+     `"async": true`, so Claude doesn't wait for it.
+   - **Codex**: a plugin whose `SessionStart` hook runs the same script. Codex runs hooks
+     in a background server its terminals share (see [Limits](#limits)), so the hook only
+     labels a terminal where Codex is the program in front and isn't resuming another
+     session, and skips threads Codex starts for itself.
+   - **OpenCode**: [`opencode/herdr-recover.js`](opencode/herdr-recover.js), loaded by the
+     terminal's OpenCode (not `opencode run`, `serve` or `attach`), records the root session
+     last created or written to.
+   - **Pi**: [`pi/herdr-recover.ts`](pi/herdr-recover.ts), in interactive Pi only, records
+     the session once it has a file (at its first prompt, or at its start when resumed).
 2. **The mod** (`mods/recover/main.js`) runs in the app's status bar (and in its dialog),
    in two passes over every terminal the app sees, on every machine, that carries
    `recover.session`. Every second it looks for losses in what the app already knows
@@ -94,38 +129,47 @@ Sessions already running are remembered from their next start (or `/resume`).
    resumes them all at once, 1.5 s after each new shell appears. Every 5 seconds it asks the
    machines what runs, for the list and for resumes that didn't come up:
    - **Lost**: the terminal's program is no longer the one recorded: a new shell after a
-     restart. Whatever files the old agent left, it can't be running in the new shell.
-     Once that shell has been up 1.5 s, the mod types the resume line into it
+     restart. Once that shell has been up 1.5 s, the mod types the resume line into it
      with `hc send` (`cd -- '<folder>' && claude … --resume <id>` in sh shells,
      `Set-Location -LiteralPath '<folder>'; & 'claude' … '--resume' '<id>'` in
      PowerShell), claiming the terminal first so no other copy sends it twice. For a
      terminal on another machine, `hc send` runs on that machine (`exec … { on }`): sent
      from here, hc would wrap the line as a note from another machine
      (`<hc from="…">…</hc>`) when the terminal ever reported agent status.
-   - **Running**: the agent is the terminal's foreground (Linux, macOS). In a Windows
-     shell, hc never sees a child program, so there the agent's session file
-     (`sessions/<pid>.json`, which the hook names) must name the session *and* its pid
-     must be a running `claude.exe` (`tasklist`): a killed agent leaves its file behind.
+   - **Running**: the agent is the terminal's foreground (Linux, macOS); its flags are read
+     from there when its integration didn't record them. In a Windows shell, hc never sees
+     a child program: there Claude Code's session file (which the hook names) must name the
+     session *and* its pid must be a running `claude.exe` (`tasklist`), since a killed agent
+     leaves its file behind; for OpenCode and Pi, the pid their plugin recorded must run.
+   - **Quit**: Codex, OpenCode and Pi have no end-of-session hook that tells a quit from a
+     restart (Codex's `SessionEnd` also fires after 30 idle minutes). When the mod sees one
+     of them gone from the shell it ran under for 8 seconds, it forgets the session.
    - **Resume failed**: the agent didn't come up within 60 seconds of a resume. A toast
      says so; the dialog offers a retry. A failed session is not tried again by itself;
      if it comes up late after all, the mark goes.
-   - **Interrupted**: the agent died but its shell lived on (a crash). Not resumed by
+   - **Interrupted**: Claude Code died but its shell lived on (a crash). Not resumed by
      itself (you were there); the dialog offers Resume and Forget.
 3. **The dialog** (`ctrl-shift-r`) lists the focused terminal's session, the ones that need
    you and the rest, with Resume, Forget and an Auto toggle per terminal
-   (`recover.auto=off`), and shows which machines have the hook.
+   (`recover.auto=off`), and shows which agents are set up on which machine.
 
 Labels live on herdr-core's terminal record: they survive core restarts and reboots and
 go away with the terminal. `hc get t3 --json` shows them.
 
 ## Limits
 
-- **Claude Code only** for now. The agent table (`AGENTS` in `lib/core.js`, with the
-  flag allowlist from herdr-revive) is built to take Codex and others, but each needs its
-  hook and its "is it running" signal.
-- **Not yet tried through a full reboot or `wsl --shutdown`**, only through single-terminal
-  losses (see Status). hc's holder is shared by every terminal on a machine, so a real
-  multi-terminal recovery needs a core restart.
+- **Codex shares one background server between its terminals**, and runs hooks there
+  with the environment of the terminal that started it. So with several Codex terminals,
+  a session started in another one than that is not remembered (Recover's checks keep it
+  from landing on the wrong terminal; the Herdr TUI's integration has the same gap). Run
+  `codex --no-daemon` in herdr terminals for every session to be remembered: each Codex
+  then runs its own hooks, and the flag is carried to the resume.
+- **A Codex, OpenCode or Pi session quit while the app was closed** is resumed after the
+  next restart: only the app sees those agents end.
+- **Codex isn't supported on Windows**, and OpenCode and Pi there are untested.
+- **Not yet tried through a full reboot or `wsl --shutdown`**, only through losses of a
+  few terminals and a core stop. hc gives a WSL distro's kept terminals their new shells
+  about a minute after its core starts.
 - **Resume in a shell whose agent crashed** (Interrupted, the dialog's Resume) can type
   garbage: the dead agent leaves its terminal modes on (bracketed paste, the kitty
   keyboard), and PowerShell's line editor reads the paste markers as keys. After a
@@ -136,7 +180,6 @@ go away with the terminal. `hc get t3 --json` shows them.
   with some settings) can lose the line; the mod then reports "Resume failed".
 - Nothing happens while the app is closed. On a headless server you never open the app
   for, nothing is resumed until you do.
-- The hook needs `hc` on the PATH that Claude Code's hooks get (`RECOVER_HC` overrides).
 
 ## Development
 
@@ -146,13 +189,15 @@ npm test    # unit tests for the rules, then the hook against a fake hc
 
 `herdr-app check mods/recover` loads the mod once. Run the hook tests on Linux too
 (`sh test/hook.test.sh` in WSL): `/bin/sh` is dash there, and the flag reading only runs
-where `/proc` exists.
+where `/proc` exists. `RECOVER_SOURCE=$PWD sh install.sh` installs the integrations from
+the clone; `claude --plugin-dir .` loads the Claude Code plugin for one session.
 
 ## Credits
 
 The flag allowlist and much of the state model come from
-[herdr-revive](https://github.com/dmazlum/herdr-revive) (MIT). The app-side design is the
-Herdr TUI's (`src/app/agent_resume.rs` in [herdr](https://github.com/herdrdev/herdr)).
+[herdr-revive](https://github.com/dmazlum/herdr-revive) (MIT). The app-side design and the
+resume commands are the Herdr TUI's (`src/app/agent_resume.rs` in
+[herdr](https://github.com/herdrdev/herdr)).
 
 ## License
 

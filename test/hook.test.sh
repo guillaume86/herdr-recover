@@ -20,13 +20,15 @@ EOF
 chmod +x "$tmp/hc"
 mkdir -p "$tmp/claude/sessions"
 
-terminal() { # $1 = recover.* labels as JSON members (may be empty)
-  printf '{"address":"t3","argv":["/bin/bash"],"foreground":{"argv":["claude"],"name":"claude","pid":777},"keep":true,"labels":{"where":"x / 1"%s},"name":null,"parent":null,"pid":4242,"state":"live"}\n' "${1:+,$1}" > "$tmp/get.json"
+CLAUDE_FRONT='{"argv":["claude"],"cwd":"/w","name":"claude","pid":777}'
+terminal() { # $1 = recover.* labels as JSON members (may be empty), $2 = the program in front
+  printf '{"address":"t3","argv":["/bin/bash"],"foreground":%s,"keep":true,"labels":{"where":"x / 1"%s},"name":null,"parent":null,"pid":4242,"state":"live"}\n' \
+    "${2:-$CLAUDE_FRONT}" "${1:+,$1}" > "$tmp/get.json"
 }
 session_file() { printf '{"pid":%s,"sessionId":"%s","cwd":"/w","kind":"%s"}' "$1" "$2" "$3" > "$tmp/claude/sessions/$1.json"; }
-fire() { # $1 = JSON payload
+fire() { # $1 = JSON payload, $2 = the agent (default: Claude Code's hook, called without one)
   : > "$tmp/labels"
-  printf '%s' "$1" | HC_TERMINAL_ID=t3 RECOVER_HC="$tmp/hc" CLAUDE_CONFIG_DIR="$tmp/claude" sh "$hook"
+  printf '%s' "$1" | HC_TERMINAL_ID=t3 RECOVER_HC="$tmp/hc" CLAUDE_CONFIG_DIR="$tmp/claude" sh "$hook" ${2:+"$2"}
   echo "exit $?" >> "$tmp/labels"
 }
 has() { grep -qxF -- "$1" "$tmp/labels" || { echo "FAIL ($name): expected label $1"; cat "$tmp/labels"; fails=$((fails + 1)); }; }
@@ -100,6 +102,39 @@ if [ -r /proc/self/cmdline ] && [ "$(uname -s)" = Linux ]; then
     "$tmp/bin/claude" -c 'sh "$0" < "$1"; true' "$hook" "$tmp/payload" --model opus "a prompt" --add-dir /a "/b c" --dangerously-skip-permissions
   has 'recover.flags=["--model","opus","--add-dir","/a","/b c","--dangerously-skip-permissions"]'
 fi
+
+name="codex: a session is recorded on the terminal Codex is in front of"
+CODEX_FRONT='{"argv":["codex","-m","gpt-5.5"],"cwd":"/w","name":"codex","pid":900}'
+terminal "" "$CODEX_FRONT"
+fire "{\"session_id\":\"$ID\",\"cwd\":\"/w\",\"hook_event_name\":\"SessionStart\",\"source\":\"startup\"}" codex
+has "recover.agent=codex"; has "recover.session=$ID"; has "recover.shell=4242"; has "recover.flags=[]"; exited0
+
+name="codex: not on a terminal where Codex isn't in front (its server's terminal moved on)"
+terminal ""
+fire "{\"session_id\":\"$ID\",\"cwd\":\"/w\",\"hook_event_name\":\"SessionStart\"}" codex
+none; exited0
+
+name="codex: not on a terminal resuming another session; yes on the one resuming this one"
+terminal "" "{\"argv\":[\"codex\",\"resume\",\"$OTHER\"],\"cwd\":\"/w\",\"name\":\"codex\",\"pid\":900}"
+fire "{\"session_id\":\"$ID\",\"cwd\":\"/w\",\"hook_event_name\":\"SessionStart\",\"source\":\"resume\"}" codex
+none
+terminal "" "{\"argv\":[\"codex\",\"resume\",\"$ID\"],\"cwd\":\"/w\",\"name\":\"codex\",\"pid\":900}"
+fire "{\"session_id\":\"$ID\",\"cwd\":\"/w\",\"hook_event_name\":\"SessionStart\",\"source\":\"resume\"}" codex
+has "recover.session=$ID"
+
+name="codex: a thread Codex started for itself (a sub-agent) is not recorded"
+terminal "" "$CODEX_FRONT"
+printf '{"type":"session_meta","payload":{"id":"%s","thread_source":"subagent"}}\n{"x":1}\n' "$OTHER" > "$tmp/rollout.jsonl"
+fire "{\"session_id\":\"$OTHER\",\"transcript_path\":\"$tmp/rollout.jsonl\",\"cwd\":\"/w\",\"hook_event_name\":\"SessionStart\"}" codex
+none
+printf '{"type":"session_meta","payload":{"id":"%s","thread_source":"user"}}\n' "$ID" > "$tmp/rollout.jsonl"
+fire "{\"session_id\":\"$ID\",\"transcript_path\":\"$tmp/rollout.jsonl\",\"cwd\":\"/w\",\"hook_event_name\":\"SessionStart\"}" codex
+has "recover.session=$ID"
+
+name="codex: its SessionEnd (also sent after 30 idle minutes) forgets nothing"
+terminal "\"recover.session\":\"$ID\"" "$CODEX_FRONT"
+fire "{\"session_id\":\"$ID\",\"hook_event_name\":\"SessionEnd\",\"reason\":\"other\"}" codex
+none
 
 name="outside a herdr terminal it does nothing"
 : > "$tmp/labels"
