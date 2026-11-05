@@ -3,10 +3,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, writeFileSync, readFileSync, rmSync, chmodSync, existsSync } from "node:fs";
+import { mkdtempSync, writeFileSync, readFileSync, rmSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { windows } from "./sh.js";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -14,16 +15,18 @@ const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 function run(body) {
   const dir = mkdtempSync(join(tmpdir(), "recover-plugin-"));
   try {
-    const hc = join(dir, "hc");
-    writeFileSync(hc, `#!/bin/sh
-printf '%s\\n' "$*" >> "${dir}/calls"
-[ "$1" = get ] && printf '{"address":"t3","labels":{},"parent":null,"pid":4242,"state":"live"}\\n'
-exit 0
+    // hc is node, given the subcommand as the script to run (`node get t3 --json`), one in the
+    // folder the plugin runs in: Windows runs no script as a program, and Git Bash's sh crashes
+    // on some of the labels' words there.
+    for (const cmd of ["get", "label"]) {
+      writeFileSync(join(dir, cmd), `require("fs").appendFileSync(${JSON.stringify(join(dir, "calls"))}, ${JSON.stringify(cmd)} + " " + process.argv.slice(2).join(" ") + "\\n");
+if (${JSON.stringify(cmd)} === "get") process.stdout.write('{"address":"t3","labels":{},"parent":null,"pid":4242,"state":"live"}\\n');
 `);
-    chmodSync(hc, 0o755);
+    }
+    const hc = process.execPath;
     writeFileSync(join(dir, "session.jsonl"), "{}\n");
-    const r = spawnSync(process.execPath, ["--input-type=module", "-e", body.replaceAll("$SESSION_FILE", join(dir, "session.jsonl"))], {
-      env: { ...process.env, HC_TERMINAL_ID: "t3", RECOVER_HC: hc }, timeout: 20_000,
+    const r = spawnSync(process.execPath, ["--input-type=module", "-e", body.replaceAll("$SESSION_FILE", join(dir, "session.jsonl").replaceAll("\\", "\\\\"))], {
+      cwd: dir, env: { ...process.env, HC_TERMINAL_ID: "t3", RECOVER_HC: hc }, timeout: 20_000,
     });
     const calls = existsSync(join(dir, "calls")) ? readFileSync(join(dir, "calls"), "utf8").trim().split("\n") : [];
     return { calls, status: r.status, signal: r.signal, stderr: r.stderr.toString() };
@@ -32,7 +35,14 @@ exit 0
   }
 }
 
+// On Windows, process.kill() ends a process at once, whatever its listeners: a signal a
+// listener sees (a closed console's SIGHUP) can't be sent from here.
+const noSignals = windows && "Windows can't send a signal a listener sees";
+
 const sleep = "const sleep = (ms) => new Promise((r) => setTimeout(r, ms));";
+// Time for the integration to record the session (a get, then a label) before the test ends it:
+// on Windows a process starts more slowly.
+const settle = windows ? 1500 : 400;
 
 // OpenCode 2's TUI: its own SIGHUP and SIGTERM handlers exit 0 after cleaning up.
 const opencode = (end, { route = "ses_root", ownHandlers = true } = {}) => `
@@ -43,7 +53,7 @@ const opencode = (end, { route = "ses_root", ownHandlers = true } = {}) => `
   const api = { ui: { router: { current: () => ({ type: "session", sessionID: ${JSON.stringify(route)} }) } },
     data: { session: { get: (id) => sessions[id] } } };
   plugin.setup(api);
-  await sleep(400);
+  await sleep(${settle});
   ${end}
   await sleep(2000);
 `;
@@ -66,7 +76,7 @@ test("opencode: the person's quit marks it ended", () => {
 });
 
 for (const signal of ["SIGHUP", "SIGTERM"]) {
-  test(`opencode: ${signal}, though OpenCode then exits 0, leaves it to be resumed`, () => {
+  test(`opencode: ${signal}, though OpenCode then exits 0, leaves it to be resumed`, { skip: noSignals }, () => {
     const { calls, status } = run(opencode(`process.kill(process.pid, "${signal}");`));
     assert.equal(status, 0);
     assert.ok(!calls.some((c) => /recover\.ended=\S/.test(c)), calls.join("\n"));
@@ -79,7 +89,7 @@ test("opencode: a crash leaves it to be resumed", () => {
   assert.ok(!calls.some((c) => /recover\.ended=\S/.test(c)));
 });
 
-test("opencode: without handlers of OpenCode's own, a signal still ends the process", () => {
+test("opencode: without handlers of OpenCode's own, a signal still ends the process", { skip: noSignals }, () => {
   const { signal } = run(opencode(`process.kill(process.pid, "SIGHUP");`, { ownHandlers: false }));
   assert.equal(signal, "SIGHUP");
 });
@@ -95,7 +105,7 @@ const pi = (end, mode = "tui") => `
   extension({ on: (name, f) => (handlers[name] ??= []).push(f) });
   for (const s of ["SIGHUP", "SIGTERM"]) process.prependListener(s, async () => { await sleep(20); await fire("session_shutdown", { reason: "quit" }, ctx); process.exit(0); });
   await fire("session_start", { reason: "startup" }, ctx);
-  await sleep(300);
+  await sleep(${settle});
   ${end}
   await sleep(2000);
 `;
@@ -109,7 +119,7 @@ test("pi: the session is recorded, and the person's quit marks it ended", { skip
 });
 
 for (const signal of ["SIGHUP", "SIGTERM"]) {
-  test(`pi: ${signal}, though Pi then says "quit", leaves it to be resumed`, { skip: !piRuns && "this Node can't load .ts" }, () => {
+  test(`pi: ${signal}, though Pi then says "quit", leaves it to be resumed`, { skip: noSignals || (!piRuns && "this Node can't load .ts") }, () => {
     const { calls, status } = run(pi(`process.kill(process.pid, "${signal}");`));
     assert.equal(status, 0);
     assert.ok(calls.some((c) => c.includes("recover.session=pi-sess-1")));

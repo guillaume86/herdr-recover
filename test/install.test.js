@@ -7,6 +7,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, chmodSync,
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { sh as shExe, toolPath, shPath, mixedPath, gitRoot, windows } from "./sh.js";
 
 const installer = join(dirname(fileURLToPath(import.meta.url)), "..", "install.sh");
 // hc 0.1.18's default PowerShell -Command on Windows (`hc get <t> --json` of a terminal started
@@ -22,13 +23,15 @@ function home({ opencode = null } = {}) {
   mkdirSync(bin);
   const tool = (n, body) => { writeFileSync(join(bin, n), `#!/bin/sh\n${body}\n`); chmodSync(join(bin, n), 0o755); };
   tool("hc", "exit 0");
+  // These cases are Linux's (and macOS's): on Windows, Git Bash says Linux to the installer.
+  if (windows) tool("uname", "echo Linux");
   if (opencode) tool("opencode", `echo "opencode v${opencode}"`);
   const env = {
-    PATH: `${bin}:/usr/bin:/bin`, HOME: dir,
+    PATH: toolPath(bin), HOME: dir,
     XDG_CONFIG_HOME: join(dir, "config"), XDG_DATA_HOME: join(dir, "data"), XDG_STATE_HOME: join(dir, "state"),
   };
   const sh = (...args) => {
-    const r = spawnSync("sh", [installer, ...args], { env });
+    const r = spawnSync(shExe, [installer, ...args], { env });
     return r.stdout.toString() + r.stderr.toString();
   };
   const cfg = join(dir, "config", "herdr-core", "config.toml");
@@ -48,7 +51,7 @@ test("herdr-core: a fresh config gets the shell, and uninstall takes it out", ()
     assert.match(h.sh(), /herdr-core:\n {2}installed/);
     const script = join(h.dir, ".local", "bin", "herdr-recover-shell");
     assert.ok(existsSync(script));
-    if (hasToml) assert.deepEqual(toml(h.cfg).shell, [script]);
+    if (hasToml) assert.deepEqual(toml(h.cfg).shell, [shPath(script)]);
     assert.match(h.sh("--doctor"), /herdr-core: shell set up/);
     h.sh("--uninstall");
     assert.equal(h.read(h.cfg), null);
@@ -66,7 +69,7 @@ test("herdr-core: a shell already set is run by Recover's, and given back", () =
     h.sh();
     if (hasToml) {
       const parsed = toml(h.cfg);
-      assert.deepEqual(parsed.shell, [join(h.dir, ".local", "bin", "herdr-recover-shell"), "nu", "--login"]);
+      assert.deepEqual(parsed.shell, [shPath(join(h.dir, ".local", "bin", "herdr-recover-shell")), "nu", "--login"]);
       assert.equal(parsed.notes, false);
       assert.deepEqual(parsed.ssh, { x: 1 });
     }
@@ -94,27 +97,42 @@ test("herdr-core: a shell over several lines is left alone", () => {
 });
 
 test("herdr-core on Windows: PowerShell starts the job through Git Bash", () => {
-  // Git Bash, faked: C: is a folder of the test's, and cygpath maps between the two forms.
+  // On Windows, the real Git Bash. Elsewhere, Git Bash faked: C: is a folder of the test's, and
+  // cygpath maps between the two forms.
   const dir = mkdtempSync(join(tmpdir(), "recover-install-win-"));
   try {
     const bin = join(dir, "bin");
     const c = join(dir, "c");
     mkdirSync(bin);
-    mkdirSync(join(c, "Program Files", "Git", "bin"), { recursive: true });
-    writeFileSync(join(c, "Program Files", "Git", "bin", "sh.exe"), "");
     const tool = (n, body) => { writeFileSync(join(bin, n), `#!/bin/sh\n${body}\n`); chmodSync(join(bin, n), 0o755); };
-    tool("uname", "echo MINGW64_NT-10.0");
     tool("hc", "exit 0");
     tool("pwsh.exe", "exit 0");
-    tool("cygpath", `case "$1" in
+    let env, home, appdata, git, hc;
+    if (windows) {
+      home = join(dir, "Jo O'Neil");
+      appdata = join(home, "AppData", "Roaming");
+      env = { PATH: toolPath(bin), HOME: home, APPDATA: appdata };
+      git = gitRoot;
+      hc = mixedPath(join(bin, "hc"));
+    } else {
+      mkdirSync(join(c, "Program Files", "Git", "bin"), { recursive: true });
+      writeFileSync(join(c, "Program Files", "Git", "bin", "sh.exe"), "");
+      tool("uname", "echo MINGW64_NT-10.0");
+      tool("cygpath", `case "$1" in
   -u) printf '%s\\n' "$2" | sed 's#\\\\#/#g; s#^C:#${c}#' ;;
   -m) case "$2" in /) echo "C:/Program Files/Git/" ;; ${c}/*) printf '%s\\n' "$2" | sed 's#^${c}#C:#' ;; *) printf 'C:/msys%s\\n' "$2" ;; esac ;;
 esac`);
-    const env = { PATH: `${bin}:/usr/bin:/bin`, HOME: join(c, "Users", "Jo O'Neil"), APPDATA: "C:\\Users\\Jo O'Neil\\AppData\\Roaming" };
-    const out = spawnSync("sh", [installer], { env }).stdout.toString();
+      home = join(c, "Users", "Jo O'Neil");
+      appdata = join(home, "AppData", "Roaming");
+      env = { PATH: toolPath(bin), HOME: home, APPDATA: "C:\\Users\\Jo O'Neil\\AppData\\Roaming" };
+      git = "C:/Program Files/Git";
+      hc = `C:/msys${bin}/hc`;
+    }
+    const out = spawnSync(shExe, [installer], { env }).stdout.toString();
     assert.match(out, /herdr-core:\n {2}installed/, out);
-    const cfg = join(c, "Users", "Jo O'Neil", "AppData", "Roaming", "herdr-core", "config.toml");
-    assert.ok(existsSync(join(c, "Users", "Jo O'Neil", ".local", "bin", "herdr-recover-shell")));
+    const cfg = join(appdata, "herdr-core", "config.toml");
+    const script = join(home, ".local", "bin", "herdr-recover-shell");
+    assert.ok(existsSync(script));
     if (!hasToml) return;
     const [exe, ...args] = toml(cfg).shell;
     assert.equal(exe, "pwsh.exe");
@@ -122,9 +140,11 @@ esac`);
     // known to hc, then the job; `cygpath -m /`'s trailing slash doesn't double the one after it.
     assert.deepEqual(args.slice(0, 2), ["-NoExit", "-Command"]);
     assert.equal(args.length, 3);
+    const quoted = (p) => p.replaceAll("'", "''");
+    const scriptWin = windows ? mixedPath(script) : "C:/Users/Jo O'Neil/.local/bin/herdr-recover-shell";
     assert.equal(args[2], HC_PROMPT + "; " +
-      "if ($env:HC_TERMINAL_ID) { try { Start-Process -WindowStyle Hidden -FilePath 'C:/Program Files/Git/bin/sh.exe' " +
-      `-ArgumentList ('"C:/Users/Jo O''Neil/.local/bin/herdr-recover-shell" --job {0} {1} pwsh "C:/msys${bin}/hc"' -f $env:HC_TERMINAL_ID, $PID) } catch {} }`);
+      `if ($env:HC_TERMINAL_ID) { try { Start-Process -WindowStyle Hidden -FilePath '${quoted(git)}/bin/sh.exe' ` +
+      `-ArgumentList ('"${quoted(scriptWin)}" --job {0} {1} pwsh "${quoted(hc)}"' -f $env:HC_TERMINAL_ID, $PID) } catch {} }`);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 

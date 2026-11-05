@@ -73,8 +73,9 @@ test("posix lines come back as the same words in sh", () => {
     const { line } = readWith("awk", terminal(labels), "posix");
     if (!line) continue;
     const rec = readRecord(labels);
-    // Run the line with `cd` and the agent replaced by printers of their arguments.
-    const out = execFileSync("sh", ["-c", `cd() { :; }; env() { shift; "$@"; }; claude() { printf '[%s]' claude "$@"; }; codex() { printf '[%s]' codex "$@"; }; opencode() { printf '[%s]' opencode "$@"; }; pi() { printf '[%s]' pi "$@"; }; ${line}`]).toString();
+    // Run the line with `cd` and the agent replaced by printers of their arguments. On stdin: on
+    // Windows, an argument goes through a command line, which Git Bash splits its own way.
+    const out = execFileSync("sh", ["-s"], { input: `cd() { :; }; env() { shift; "$@"; }; claude() { printf '[%s]' claude "$@"; }; codex() { printf '[%s]' codex "$@"; }; opencode() { printf '[%s]' opencode "$@"; }; pi() { printf '[%s]' pi "$@"; }; ${line}\n` }).toString();
     const argv = { claude: ["claude", ...rec.flags, "--resume", rec.session], codex: ["codex", "resume", ...rec.flags, rec.session],
       opencode: ["opencode", ...rec.flags, "--session", rec.session], pi: ["pi", ...rec.flags, "--session", rec.session] }[rec.agent];
     assert.equal(out, argv.map((w) => `[${w}]`).join(""), name);
