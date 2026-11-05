@@ -89,15 +89,17 @@ Things that may go wrong there (unverified assumptions):
 - OpenCode 1 still gets the old server plugin with no quit marking. Drop OpenCode 1?
 - Version/README status wording ("v2 (branch)"); package.json version unchanged (0.1.0).
 
-## State of msi-gui-ubuntu (Linux devbox)
+## State of the Linux machines (2026-11-05)
 
-- Installed earlier from `main`: Claude Code plugin (fine) and **OpenCode 1's plugin file at
-  `~/.config/opencode/plugins/herdr-recover.js` while OpenCode is 2.0.28**: under v2 it would
-  load in the shared background service and label whichever terminal started it. Run v2's
-  `install.sh` there (it removes that file, adds the TUI plugin and the core shell); not done
-  yet, waiting for the owner's go since the core reads its config live.
-- `~/.config/environment.d/999-local-bin.conf` puts `~/.local/bin` (hc) on the systemd user
-  PATH; recover-shell.sh no longer needs it (it finds hc from its parent).
+v2 is installed (commit 4d31a84) on the three machines the laptop's app links:
+msi-gui-ubuntu (clone ~/src/herdr-recover), gui-desktop-26-ubuntu (~/dev/herdr-recover) and
+the NAS container `herdr` (~/.local/share/herdr-recover; the NAS's web UI is ovis, not the
+Herdr app). On each: `~/.config/herdr-core/config.toml` runs
+`~/.local/bin/herdr-recover-shell` (a throwaway terminal opened into bash through it), the
+Claude Code plugin (from main; its hook is the same in v2), and OpenCode 2's TUI plugin in
+`~/.config/opencode/herdr-recover`, listed in cli.json. OpenCode 1's plugin file, installed
+there earlier the same day, was removed. No legacy Herdr TUI integrations were left on them.
+To update later: `git pull` in the clone, then `sh install.sh`.
 
 ## Facts established about hc 0.1.18 (for later work)
 
