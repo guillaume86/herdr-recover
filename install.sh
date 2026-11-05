@@ -38,13 +38,16 @@ edit_settings() { # $1 = add|remove
   mkdir -p "$config"
   [ -f "$settings" ] || printf '{}\n' > "$settings"
   [ -f "$settings.recover-backup" ] || cp "$settings" "$settings.recover-backup"
+  # python and jq on Windows are native programs: give them C:/... paths (Git Bash has cygpath).
+  native=$settings
+  if command -v cygpath >/dev/null 2>&1; then native=$(cygpath -m "$settings"); fi
   if [ "$tool" = jq ]; then
     if [ "$1" = add ]; then
       jq --arg cmd "$command" '
         .hooks //= {} |
         .hooks.SessionStart = ([(.hooks.SessionStart // [])[] | .hooks = [(.hooks // [])[] | select((.command // "") | contains("herdr-recover") | not)] | select(.hooks | length > 0)] + [{"hooks":[{"type":"command","command":$cmd,"timeout":10}]}]) |
         .hooks.SessionEnd = ([(.hooks.SessionEnd // [])[] | .hooks = [(.hooks // [])[] | select((.command // "") | contains("herdr-recover") | not)] | select(.hooks | length > 0)] + [{"hooks":[{"type":"command","command":$cmd,"timeout":10}]}])
-      ' "$settings" > "$settings.tmp"
+      ' "$native" > "$settings.tmp"
     else
       jq '
         .hooks //= {} |
@@ -53,13 +56,13 @@ edit_settings() { # $1 = add|remove
         if .hooks.SessionStart == [] then del(.hooks.SessionStart) else . end |
         if .hooks.SessionEnd == [] then del(.hooks.SessionEnd) else . end |
         if .hooks == {} then del(.hooks) else . end
-      ' "$settings" > "$settings.tmp"
+      ' "$native" > "$settings.tmp"
     fi
   else
-    RECOVER_MODE="$1" RECOVER_HOOK="$command" RECOVER_SETTINGS="$settings" "$tool" - <<'PY' > "$settings.tmp"
+    RECOVER_MODE="$1" RECOVER_HOOK="$command" RECOVER_SETTINGS="$native" "$tool" - <<'PY' > "$settings.tmp"
 import json, os
 mode, cmd, path = os.environ["RECOVER_MODE"], os.environ["RECOVER_HOOK"], os.environ["RECOVER_SETTINGS"]
-with open(path, encoding="utf-8") as f:
+with open(path, encoding="utf-8-sig") as f:
     text = f.read()
 doc = json.loads(text) if text.strip() else {}
 hooks = doc.setdefault("hooks", {})
@@ -77,7 +80,9 @@ for event in ("SessionStart", "SessionEnd"):
         hooks.pop(event, None)
 if not hooks:
     doc.pop("hooks", None)
-print(json.dumps(doc, indent=2, ensure_ascii=False))
+# Bytes, not print(): on Windows a redirected stdout would use the console's code page and CRLF.
+import sys
+sys.stdout.buffer.write((json.dumps(doc, indent=2, ensure_ascii=False) + "\n").encode("utf-8"))
 PY
   fi
   mv "$settings.tmp" "$settings"
