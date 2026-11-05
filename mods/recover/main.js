@@ -21,9 +21,17 @@ import {
   parseSessionFiles, winArgv, shortId, ago, splitAddress, psQuote,
 } from "./lib/core.js";
 
-const TICK_MS = 5000;
-// A terminal is resumed only once its new shell has been seen for a whole tick: time for
-// the shell to read its profile before the line lands (the tty keeps the input anyway).
+// Two passes. The quick one looks for lost sessions every second in what the app already
+// knows (terminals()): no process starts, nothing that waits on a core that is down. The
+// slow one asks the machines what runs (tasklist, session files) for the list and for
+// resumes that didn't come up.
+const FAST_MS = 1000;
+const SLOW_MS = 5000;
+// A new shell gets this long to read its profile before the line lands; the terminal keeps
+// typed input anyway (the Herdr TUI waited 750 ms).
+const SETTLE_MS = 1500;
+// How long a sent resume holds its terminal, so no copy of the mod sends it twice.
+const CLAIM_MS = 60_000;
 const STATE_KEY = "recover.state";
 const HOOK_MARK = "herdr-recover";
 const MAX_SHARE = 0.85;
@@ -40,14 +48,69 @@ const NEEDS_YOU = new Set(["lost", "interrupted", "failed"]);
 
 const isWindows = () => { try { return appWindow()?.platform === "windows"; } catch { return false; } };
 
-/** The mod's memory across copies, ticks and app restarts: each terminal's program last tick, when its agent was last seen live. */
-function mem() { return { pid: {}, live: {}, flags: {}, entries: [], hooks: {}, at: 0, ...(shared(STATE_KEY) ?? {}) }; }
-function remember(m) { setShared(STATE_KEY, m); }
+/**
+ * The mod's memory across copies, passes and app restarts: when each lost terminal's new
+ * shell was first seen (`seen`), which resumes are in flight (`sending`), when each agent
+ * was last seen live, and the list the bar and the dialog draw.
+ */
+function mem() { return { seen: {}, sending: {}, live: {}, flags: {}, entries: [], hooks: {}, at: 0, ...(shared(STATE_KEY) ?? {}) }; }
+// Setting shared state redraws every mod in the window: only write what changed.
+function remember(m) {
+  const before = JSON.stringify(shared(STATE_KEY) ?? null);
+  if (JSON.stringify(m) !== before) setShared(STATE_KEY, m);
+}
 
-async function getTerminal(address) {
-  const r = await hc(["get", address, "--json"]);
-  if (r.code !== 0) throw new Error(r.stderr || r.stdout || `hc get ${address} failed`);
-  return JSON.parse(r.stdout);
+/** A terminal as the app knows it now (terminals() carries what `hc get` does). */
+const terminalNow = (address) => terminals().find((t) => t.address === address) ?? null;
+
+/** What the mod needs to type a resume into a terminal. */
+function target(t) {
+  const { on, id } = splitAddress(t.address);
+  return {
+    address: t.address, on, id, rec: readRecord(t.labels), pid: t.pid ?? null,
+    where: t.labels?.where ?? null, shell: shellKind(t.argv ?? []),
+    busy: Boolean(t.foreground?.pid && t.pid && t.foreground.pid !== t.pid && !isWindowsShell(t.argv ?? [])),
+  };
+}
+
+/**
+ * The quick pass: every terminal whose program changed since its session was recorded
+ * (a new shell after a restart) gets the resume line once that shell has been up
+ * SETTLE_MS, all of them at once. Each is claimed in shared state before anything is
+ * sent, so the bar and the dialog never both send.
+ */
+async function watchLosses(now = Date.now()) {
+  const m = mem();
+  const seen = {};
+  const due = [];
+  for (const [address, claim] of Object.entries(m.sending)) if (now - claim.at >= CLAIM_MS) delete m.sending[address];
+  for (const t of terminals()) {
+    if (t.state !== "live" || !t.labels?.[`${PREFIX}session`]) continue;
+    const rec = readRecord(t.labels);
+    const pid = t.pid ?? null;
+    if (decide(rec, { state: stateOf(rec, { live: false, pid }), now }) !== "resume") continue;
+    seen[t.address] = m.seen[t.address]?.pid === pid ? m.seen[t.address] : { pid, at: now };
+    const claim = m.sending[t.address];
+    if (now - seen[t.address].at < SETTLE_MS || (claim && claim.pid === pid)) continue;
+    const entry = target(t);
+    if (entry.busy) continue;
+    m.sending[t.address] = { pid, at: now };
+    due.push(entry);
+  }
+  m.seen = seen;
+  remember(m);
+  if (!due.length) return;
+  const results = await Promise.all(due.map(async (entry) => {
+    try { return { entry, sent: await resume(entry) }; }
+    catch (e) { return { entry, error: String(e?.message ?? e) }; }
+  }));
+  const sent = results.filter((r) => r.sent).map((r) => r.entry);
+  const failed = results.filter((r) => r.error);
+  if (sent.length) {
+    const names = sent.map((e) => `${AGENTS[e.rec.agent].name} ${shortId(e.rec.session)} in ${e.where ?? e.address}`);
+    notify({ title: "Recover", body: sent.length === 1 ? `Resuming ${names[0]}.` : `Resuming ${sent.length} sessions: ${names.join(", ")}.`, level: "info" });
+  }
+  for (const f of failed) notify({ title: "Recover", body: `Couldn't resume ${f.entry.where ?? f.entry.address}: ${f.error}`, level: "error" });
 }
 
 /** Claude Code's sessions/<pid>.json files on a machine: which sessions are running there, under which pid. */
@@ -96,13 +159,12 @@ async function hookInstalled(on) {
  * lost, drop what the person quit, and publish the list for the dialog and the bar.
  */
 async function scan({ setup = false } = {}) {
-  const m = mem();
+  let m = mem();
   if (m.busy && Date.now() - m.busy < 20_000) return;
   m.busy = Date.now();
   remember(m);
   try {
-    const all = terminals().filter((t) => t.state === "live" && t.labels?.[`${PREFIX}session`]);
-    const infos = (await Promise.all(all.map((t) => getTerminal(t.address).catch(() => null)))).filter(Boolean);
+    const infos = terminals().filter((t) => t.state === "live" && t.labels?.[`${PREFIX}session`]);
     // Where hc sees the program in front (Linux, macOS), that alone says whether the agent runs.
     // In a Windows shell it never does: there the agent's session file must name the session
     // (the hook records which file) and its pid must be a running agent. A killed agent leaves
@@ -125,8 +187,9 @@ async function scan({ setup = false } = {}) {
     const machinesAsked = [...new Set(asked.map((t) => splitAddress(t.address).on))];
     const agentPids = new Map(await Promise.all(machinesAsked.map(async (on) => [on, await runningAgents(on)])));
     const now = Date.now();
+    // The quick pass writes this memory while the checks above ran: start from its version.
+    m = { ...mem(), busy: m.busy };
     const entries = [];
-    const seenPid = {};
     for (const t of infos) {
       const rec = readRecord(t.labels);
       if (!rec) continue;
@@ -138,7 +201,6 @@ async function scan({ setup = false } = {}) {
         : Boolean(fg && fg.pid !== t.pid && agentOf(fg.argv ?? [fg.name]) === rec.agent);
       const pid = t.pid ?? null;
       const state = stateOf(rec, { live, pid });
-      seenPid[t.address] = pid;
       if (live) m.live[t.address] = now;
       // It came up after all (a slow start marked failed): the mark goes, without waiting for the hook.
       if (live && rec.failed && rec.shell === pid) {
@@ -163,13 +225,9 @@ async function scan({ setup = false } = {}) {
       // Seen live since the last resume: a later absence is a quit, not a failed resume.
       // Unknown when the mod never saw this terminal live (an app restart since).
       const cameBack = rec.resumed && m.live[t.address] ? m.live[t.address] > rec.resumed : null;
+      // Resumes are the quick pass's: this one only notices those that never came up.
       const action = decide(rec, { state, cameBack, now });
-      // Only a shell the mod already saw a tick ago is typed into: it has had time to start.
-      if (action === "resume" && m.pid[t.address] === pid && !entry.busy) {
-        try { entry.sent = await resume(entry, { auto: true }); }
-        catch (e) { entry.error = String(e?.message ?? e); }
-        if (entry.sent) notify({ title: "Recover", body: `Resuming ${AGENTS[rec.agent].name} ${shortId(rec.session)} in ${entry.where ?? t.address}.`, level: "info" });
-      } else if (action === "fail") {
+      if (action === "fail") {
         await hc(["label", t.address, ...labelArgs({ failed: now })]);
         entry.state = "failed";
         entry.rec = { ...rec, failed: now };
@@ -177,7 +235,6 @@ async function scan({ setup = false } = {}) {
       }
       entries.push(entry);
     }
-    m.pid = seenPid;
     m.entries = entries;
     m.at = now;
     if (setup) {
@@ -188,23 +245,25 @@ async function scan({ setup = false } = {}) {
       m.hooks = Object.fromEntries(await Promise.all(places.map(async (on) => [on ?? "", await hookInstalled(on)])));
     }
   } finally {
+    // The quick pass's claims and sightings are its own: keep what it wrote meanwhile.
+    const latest = mem();
+    m.seen = latest.seen;
+    m.sending = latest.sending;
     m.busy = 0;
     remember(m);
   }
 }
 
-/** Types the resume line into the terminal. Marks the record first, so a second copy can't send it again. */
-async function resume(entry, { auto = false } = {}) {
+/** Types the resume line into the terminal. Marks the record first: the terminal is no longer lost. */
+async function resume(entry) {
   const { rec, address, pid } = entry;
   const line = resumeLine(rec, entry.shell);
   if (!line) throw new Error(`Can't write a resume command for ${address}'s shell.`);
-  const fresh = await getTerminal(address);
-  const now = Date.now();
-  const current = readRecord(fresh.labels);
-  // Another copy got there first, or the terminal changed under us.
+  const fresh = terminalNow(address);
+  const current = readRecord(fresh?.labels);
+  // The terminal changed under us: another program, another session.
   if (!current || current.session !== rec.session || fresh.pid !== pid) return false;
-  if (auto && current.resumed && current.shell === pid && now - current.resumed < 60_000) return false;
-  await hc(["label", address, ...labelArgs({ shell: pid, resumed: now, failed: null })]);
+  await hc(["label", address, ...labelArgs({ shell: pid, resumed: Date.now(), failed: null })]);
   // Sent from the terminal's own machine. From here, a send to a terminal that ever reported
   // agent status (it stays latched after the agent dies) is wrapped as a note from another
   // machine, `<hc from="…/ppid:…">line</hc>`, which the shell can't run. A local sender with
@@ -268,7 +327,9 @@ export default class Recover extends View {
       cx.notify();
     });
     tick(cx, true);
-    cx.timer.every(TICK_MS, (cx) => tick(cx, false));
+    cx.timer.every(SLOW_MS, (cx) => tick(cx, false));
+    // Shared state drives the redraws: this pass only writes when something changed.
+    cx.timer.every(FAST_MS, (cx) => cx.spawn(async () => { try { await watchLosses(); } catch { /* next second */ } }));
   }
 
   render(cx) {

@@ -87,15 +87,18 @@ Sessions already running are remembered from their next start (or `/resume`).
    with `"async": true`, so Claude doesn't wait for it: under Git Bash every process
    start can cost hundreds of milliseconds, so the hook parses JSON with one `sed` per
    document and otherwise uses shell builtins.
-2. **The mod** (`mods/recover/main.js`) runs in the app's status bar (and in its dialog).
-   Every 5 seconds it looks at every terminal the app sees, on every machine, that carries
-   `recover.session`:
+2. **The mod** (`mods/recover/main.js`) runs in the app's status bar (and in its dialog),
+   in two passes over every terminal the app sees, on every machine, that carries
+   `recover.session`. Every second it looks for losses in what the app already knows
+   (`terminals()`: no process starts, nothing that waits on a core that is down), and
+   resumes them all at once, 1.5 s after each new shell appears. Every 5 seconds it asks the
+   machines what runs, for the list and for resumes that didn't come up:
    - **Lost**: the terminal's program is no longer the one recorded: a new shell after a
      restart. Whatever files the old agent left, it can't be running in the new shell.
-     Once that shell has been there a whole tick, the mod types the resume line into it
+     Once that shell has been up 1.5 s, the mod types the resume line into it
      with `hc send` (`cd -- '<folder>' && claude … --resume <id>` in sh shells,
      `Set-Location -LiteralPath '<folder>'; & 'claude' … '--resume' '<id>'` in
-     PowerShell), marking the terminal first so no other copy sends it twice. For a
+     PowerShell), claiming the terminal first so no other copy sends it twice. For a
      terminal on another machine, `hc send` runs on that machine (`exec … { on }`): sent
      from here, hc would wrap the line as a note from another machine
      (`<hc from="…">…</hc>`) when the terminal ever reported agent status.
