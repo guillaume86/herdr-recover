@@ -1,16 +1,23 @@
-// herdr-recover for Pi: remember the session on its Herdr terminal.
+// herdr-recover for Pi: remember the session on its Herdr terminal, and forget it
+// when the person quits.
 //
 // Installed as a Pi package (`pi install git:github.com/guillaume86/herdr-recover`).
 // In the interactive Pi a terminal runs, the session it opens becomes the
 // terminal's record once it has a file on disk, as `recover.*` labels on its
-// herdr-core terminal (`hc label $HC_TERMINAL_ID …`). The Recover mod in the
-// Herdr app types `pi --session <id>` into the terminal's new shell after a
-// restart or a reboot.
+// herdr-core terminal (`hc label $HC_TERMINAL_ID …`). herdr-core's shell
+// (hook/recover-shell.sh) types `pi --session <id>` into the terminal's new shell
+// after a restart or a reboot.
+//
+// Pi says `session_shutdown` with reason "quit" both when the person quits and on
+// SIGHUP or SIGTERM (a closed terminal, a core stop, a shutdown), after its own
+// signal handler awaits the session's abort. A listener of ours sees those signals
+// first: a quit without one is the person's, and marks the session ended. A dead
+// terminal or a crash says nothing, and leaves it to be resumed.
 //
 // It never gets in Pi's way: outside a herdr terminal it does nothing, and a
 // failing `hc` is ignored.
 
-import { execFile } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 
 const HC = process.env.RECOVER_HC || "hc";
@@ -61,6 +68,22 @@ export default function (pi: any) {
   if (!terminal) return;
   let recorded: string | null = null;
   let chain: Promise<void> = Promise.resolve();
+  let signaled = false;
+  let listening = false;
+
+  // In the TUI, where Pi handles these signals itself (alone, a listener would keep one
+  // from ending the process: then it ends it as before).
+  const listen = () => {
+    if (listening) return;
+    listening = true;
+    for (const signal of ["SIGHUP", "SIGTERM"] as const) {
+      const mark = () => {
+        signaled = true;
+        if (process.listenerCount(signal) === 1) { process.removeListener(signal, mark); process.kill(process.pid, signal); }
+      };
+      process.prependListener(signal, mark);
+    }
+  };
 
   // A session is worth resuming once its file exists: at its start when it had one
   // (a resume, a fork), or at its first prompt.
@@ -76,8 +99,14 @@ export default function (pi: any) {
   };
 
   pi.on("session_start", async (_event: any, ctx: any) => {
+    if (ctx?.mode === "tui") listen();
     const file = ctx?.sessionManager?.getSessionFile?.();
     if (file && existsSync(file)) await note(ctx);
   });
   pi.on("agent_start", async (_event: any, ctx: any) => { await note(ctx); });
+  // "new", "resume", "fork" and "reload" go on in another session, which records itself.
+  pi.on("session_shutdown", (event: any, ctx: any) => {
+    if (event?.reason !== "quit" || signaled || ctx?.mode !== "tui" || !recorded) return;
+    try { execFileSync(HC, ["label", terminal, `recover.ended=${recorded}`], { timeout: 3_000, stdio: "ignore", windowsHide: true }); } catch { /* hc gone */ }
+  });
 }

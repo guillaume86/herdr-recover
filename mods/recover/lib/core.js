@@ -13,10 +13,11 @@ export const KEYS = ["agent", "session", "cwd", "flags", "dir", "file", "pid", "
 // What Recover knows of each agent: how it resumes a session, the launch flags a
 // resume should get back (with how many values each takes), and how a session the
 // person quit is told from one a restart took.
-// - Claude Code's SessionEnd hook says why a session ended (`end`).
-// - The others have no such hook: a session whose agent the mod sees gone from its
-//   terminal, under the same shell, was quit (`forgetOnExit`). One that ended while the
-//   app was closed is resumed after a later restart.
+// - Claude Code's SessionEnd hook says why a session ended (`end`); the OpenCode and Pi
+//   integrations mark a quit themselves (`recover.ended`), as that hook does.
+// - Codex can't tell (its SessionEnd fires alike for a quit, a kill and an idle unload): a
+//   session whose agent the mod sees gone from its terminal, under the same shell, was
+//   quit (`forgetOnExit`). One quit while the app was closed is resumed after a restart.
 // Claude Code's flag table comes from herdr-revive (MIT, github.com/dmazlum/herdr-revive);
 // the resume commands match the Herdr TUI's (src/agent_resume.rs in herdrdev/herdr).
 export const AGENTS = {
@@ -61,8 +62,8 @@ export const AGENTS = {
     bin: "opencode",
     apps: ["opencode"],
     resume: (id, flags) => ["opencode", ...flags, "--session", id],
-    carry: { "--model": 1, "-m": 1, "--agent": 1, "--auto": 0 },
-    forgetOnExit: true,
+    // OpenCode 1's, then 2's.
+    carry: { "--model": 1, "-m": 1, "--agent": 1, "--auto": 0, "--standalone": 0, "--server": 1 },
   },
   pi: {
     name: "Pi",
@@ -70,7 +71,6 @@ export const AGENTS = {
     apps: ["pi"],
     resume: (id, flags) => ["pi", ...flags, "--session", id],
     carry: { "--provider": 1, "--model": 1, "--thinking": 1, "--models": 1, "--approve": 0, "-a": 0 },
-    forgetOnExit: true,
   },
 };
 

@@ -1,7 +1,7 @@
 {
   "name": "herdr-recover",
   "displayName": "Herdr Recover",
-  "description": "Remembers each Claude Code session on its Herdr terminal, so the Recover mod in the Herdr app can resume it after a restart or a reboot.",
+  "description": "Remembers each Claude Code session on its Herdr terminal, so herdr-core can resume it after a restart or a reboot (with the shell install.sh sets up).",
   "author": { "name": "guillaume86", "url": "https://github.com/guillaume86" },
   "homepage": "https://github.com/guillaume86/herdr-recover",
   "repository": "https://github.com/guillaume86/herdr-recover",

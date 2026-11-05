@@ -7,7 +7,7 @@
     {
       "name": "herdr-recover",
       "source": "./",
-      "description": "Remembers each session on its Herdr terminal, so the Recover mod in the Herdr app can resume it after a restart or a reboot.",
+      "description": "Remembers each session on its Herdr terminal, so herdr-core can resume it after a restart or a reboot (with the shell install.sh sets up).",
       "category": "productivity"
     }
   ]

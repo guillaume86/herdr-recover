@@ -1,16 +1,18 @@
-// Recover: bring back the coding agent a terminal lost to a restart or a reboot.
+// Recover: the coding-agent sessions remembered on terminals, from the Herdr app.
 //
-// The hook (hook/recover-hook.sh) remembers each agent session as labels on
-// its herdr-core terminal, on whatever machine the agent runs. This mod, from
-// the Herdr app, watches every terminal the app can see (this computer and
-// the machines it is connected to), and when one came back as a bare shell
-// with a session on record, types the resume command into it, the way the
-// Herdr TUI used to. Nothing runs on the other machines but the hook and hc.
+// Each agent's integration remembers its session as labels on its herdr-core
+// terminal, on whatever machine the agent runs, and herdr-core's shell there
+// (hook/recover-shell.sh) types the resume command into a kept terminal's new
+// shell after a restart or a reboot. None of that needs the app. This mod, which
+// is optional, shows those sessions for every terminal the app can see (this
+// computer and the machines it is connected to): which run, which a restart
+// took, which a resume didn't bring back, and which died under a shell that
+// lived on (Interrupted), which nothing resumes by itself.
 //
-// Two copies of the mod run: a status-bar block (the watcher, with a count)
-// and the dialog (`mod.open:recover`, Ctrl+Shift+R), which lists the sessions
-// and offers Resume, Auto and Forget. Either copy does the watching while it
-// is up, so the dialog works even without the block in the layout.
+// Two copies of the mod run: a status-bar block (with a count) and the dialog
+// (`mod.open:recover`, Ctrl+Shift+R), which lists the sessions and offers
+// Resume, Auto and Forget. Either copy keeps the list while it is up, so the
+// dialog works even without the block in the layout.
 
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
@@ -21,17 +23,9 @@ import {
   parseSessionFiles, winArgv, shortId, ago, splitAddress, psQuote,
 } from "./lib/core.js";
 
-// Two passes. The quick one looks for lost sessions every second in what the app already
-// knows (terminals()): no process starts, nothing that waits on a core that is down. The
-// slow one asks the machines what runs (tasklist, session files) for the list and for
+// How often the list asks the machines what runs (tasklist, session files), and so notices
 // resumes that didn't come up.
-const FAST_MS = 1000;
 const SLOW_MS = 5000;
-// A new shell gets this long to read its profile before the line lands; the terminal keeps
-// typed input anyway (the Herdr TUI waited 750 ms).
-const SETTLE_MS = 1500;
-// How long a sent resume holds its terminal, so no copy of the mod sends it twice.
-const CLAIM_MS = 60_000;
 const STATE_KEY = "recover.state";
 const HOOK_MARK = "herdr-recover";
 const MAX_SHARE = 0.85;
@@ -49,11 +43,10 @@ const NEEDS_YOU = new Set(["lost", "interrupted", "failed"]);
 const isWindows = () => { try { return appWindow()?.platform === "windows"; } catch { return false; } };
 
 /**
- * The mod's memory across copies, passes and app restarts: when each lost terminal's new
- * shell was first seen (`seen`), which resumes are in flight (`sending`), when each agent
- * was last seen live, and the list the bar and the dialog draw.
+ * The mod's memory across copies, passes and app restarts: when each agent was last seen
+ * live, and the list the bar and the dialog draw.
  */
-function mem() { return { seen: {}, sending: {}, live: {}, gone: {}, flags: {}, entries: [], hooks: {}, at: 0, ...(shared(STATE_KEY) ?? {}) }; }
+function mem() { return { live: {}, gone: {}, flags: {}, entries: [], hooks: {}, at: 0, ...(shared(STATE_KEY) ?? {}) }; }
 // Setting shared state redraws every mod in the window: only write what changed.
 function remember(m) {
   const before = JSON.stringify(shared(STATE_KEY) ?? null);
@@ -62,56 +55,6 @@ function remember(m) {
 
 /** A terminal as the app knows it now (terminals() carries what `hc get` does). */
 const terminalNow = (address) => terminals().find((t) => t.address === address) ?? null;
-
-/** What the mod needs to type a resume into a terminal. */
-function target(t) {
-  const { on, id } = splitAddress(t.address);
-  return {
-    address: t.address, on, id, rec: readRecord(t.labels), pid: t.pid ?? null,
-    where: t.labels?.where ?? null, shell: shellKind(t.argv ?? []),
-    busy: Boolean(t.foreground?.pid && t.pid && t.foreground.pid !== t.pid && !isWindowsShell(t.argv ?? [])),
-  };
-}
-
-/**
- * The quick pass: every terminal whose program changed since its session was recorded
- * (a new shell after a restart) gets the resume line once that shell has been up
- * SETTLE_MS, all of them at once. Each is claimed in shared state before anything is
- * sent, so the bar and the dialog never both send.
- */
-async function watchLosses(now = Date.now()) {
-  const m = mem();
-  const seen = {};
-  const due = [];
-  for (const [address, claim] of Object.entries(m.sending)) if (now - claim.at >= CLAIM_MS) delete m.sending[address];
-  for (const t of terminals()) {
-    if (t.state !== "live" || !t.labels?.[`${PREFIX}session`]) continue;
-    const rec = readRecord(t.labels);
-    const pid = t.pid ?? null;
-    if (decide(rec, { state: stateOf(rec, { live: false, pid }), now }) !== "resume") continue;
-    seen[t.address] = m.seen[t.address]?.pid === pid ? m.seen[t.address] : { pid, at: now };
-    const claim = m.sending[t.address];
-    if (now - seen[t.address].at < SETTLE_MS || (claim && claim.pid === pid)) continue;
-    const entry = target(t);
-    if (entry.busy) continue;
-    m.sending[t.address] = { pid, at: now };
-    due.push(entry);
-  }
-  m.seen = seen;
-  remember(m);
-  if (!due.length) return;
-  const results = await Promise.all(due.map(async (entry) => {
-    try { return { entry, sent: await resume(entry) }; }
-    catch (e) { return { entry, error: String(e?.message ?? e) }; }
-  }));
-  const sent = results.filter((r) => r.sent).map((r) => r.entry);
-  const failed = results.filter((r) => r.error);
-  if (sent.length) {
-    const names = sent.map((e) => `${AGENTS[e.rec.agent].name} ${shortId(e.rec.session)} in ${e.where ?? e.address}`);
-    notify({ title: "Recover", body: sent.length === 1 ? `Resuming ${names[0]}.` : `Resuming ${sent.length} sessions: ${names.join(", ")}.`, level: "info" });
-  }
-  for (const f of failed) notify({ title: "Recover", body: `Couldn't resume ${f.entry.where ?? f.entry.address}: ${f.error}`, level: "error" });
-}
 
 /** Claude Code's sessions/<pid>.json files on a machine: which sessions are running there, under which pid. */
 async function sessionsOn(on, dirs) {
@@ -155,18 +98,27 @@ d=\${CLAUDE_CONFIG_DIR:-$HOME/.claude}; [ -d "$d" ] && echo "claude=$(has "$d/se
 d=\${CODEX_HOME:-$HOME/.codex}; [ -d "$d" ] && echo "codex=$(has "$d/config.toml" "$d/hooks.json")"
 d=\${OPENCODE_CONFIG_DIR:-\${XDG_CONFIG_HOME:-$HOME/.config}/opencode}; [ -d "$d" ] && echo "opencode=$([ -f "$d/plugins/${HOOK_MARK}.js" ] && echo 1 || echo 0)"
 d=\${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}; [ -d "$d" ] && echo "pi=$(has "$d/settings.json")"
+echo "core=$(has "\${XDG_CONFIG_HOME:-$HOME/.config}/herdr-core/config.toml" "\${APPDATA:-/nonexistent}/herdr-core/config.toml")"
 true`;
 
-/** { agent: true|false } for the agents a machine has. Null when unknown. */
+/**
+ * { agent: true|false } for the agents a machine has, and `core`: whether its herdr-core
+ * runs Recover's shell (which does the resuming there). Null when unknown.
+ */
 async function integrations(on) {
   try {
     if (!on && isWindows()) {
       // Here only Claude Code: Recover's other integrations are tested on Linux and macOS.
       const text = await readTextFile(`${home()}/.claude/settings.json`).catch(() => null);
-      return text === null ? {} : { claude: text.includes(HOOK_MARK) };
+      const core = await readTextFile(`${home()}/AppData/Roaming/herdr-core/config.toml`).catch(() => null);
+      return { ...(text === null ? {} : { claude: text.includes(HOOK_MARK) }), core: Boolean(core?.includes(HOOK_MARK)) };
     }
     const r = await exec("sh", ["-c", INTEGRATIONS], { on });
-    return Object.fromEntries([...r.stdout.matchAll(/^(\w+)=([01])$/gm)].filter((m) => AGENTS[m[1]]).map((m) => [m[1], m[2] === "1"]));
+    const found = [...r.stdout.matchAll(/^(\w+)=([01])$/gm)];
+    return {
+      ...Object.fromEntries(found.filter((m) => AGENTS[m[1]]).map((m) => [m[1], m[2] === "1"])),
+      core: found.some((m) => m[1] === "core" && m[2] === "1"),
+    };
   } catch { return null; }
 }
 
@@ -205,7 +157,6 @@ async function scan({ setup = false } = {}) {
     const machinesAsked = [...new Set(asked.map((t) => splitAddress(t.address).on))];
     const agentPids = new Map(await Promise.all(machinesAsked.map(async (on) => [on, await runningPids(on)])));
     const now = Date.now();
-    // The quick pass writes this memory while the checks above ran: start from its version.
     m = { ...mem(), busy: m.busy };
     const entries = [];
     for (const t of infos) {
@@ -258,8 +209,8 @@ async function scan({ setup = false } = {}) {
       // Seen live since the last resume: a later absence is a quit, not a failed resume.
       // Unknown when the mod never saw this terminal live (an app restart since).
       const cameBack = rec.resumed && m.live[t.address] ? m.live[t.address] > rec.resumed : null;
-      // Resumes are the quick pass's: this one only notices those that never came up, and
-      // the sessions of agents with no end hook that the person quit.
+      // herdr-core's shell resumes what a restart took: this only notices resumes that never
+      // came up, and the sessions of agents with no way to say they were quit.
       const action = decide(rec, { state, cameBack, now, goneSince: m.gone[t.address]?.at ?? null });
       if (action === "forget") {
         await hc(["label", t.address, ...clearArgs()]).catch(() => null);
@@ -286,10 +237,6 @@ async function scan({ setup = false } = {}) {
       m.hooks = Object.fromEntries(await Promise.all(places.map(async (on) => [on ?? "", await integrations(on)])));
     }
   } finally {
-    // The quick pass's claims and sightings are its own: keep what it wrote meanwhile.
-    const latest = mem();
-    m.seen = latest.seen;
-    m.sending = latest.sending;
     m.busy = 0;
     remember(m);
   }
@@ -369,8 +316,6 @@ export default class Recover extends View {
     });
     tick(cx, true);
     cx.timer.every(SLOW_MS, (cx) => tick(cx, false));
-    // Shared state drives the redraws: this pass only writes when something changed.
-    cx.timer.every(FAST_MS, (cx) => cx.spawn(async () => { try { await watchLosses(); } catch { /* next second */ } }));
   }
 
   render(cx) {
@@ -511,10 +456,12 @@ export default class Recover extends View {
       const agents = hooks[place];
       const row = h_flex().gap(8).items_center().flex_wrap().child(div().text_color(t.muted).child(`${name}:`));
       if (agents === null || typeof agents !== "object") return row.child(mark(null));
-      const keys = Object.keys(agents);
-      if (!keys.length) return row.child(div().text_color(t.dim).child("no agent here"));
+      const keys = Object.keys(agents).filter((k) => k !== "core");
+      if (!agents.core) missing.push(`herdr-core's shell on ${name}`);
+      const core = h_flex().gap(4).items_center().text_color(agents.core ? t.muted : t.ansi1).child(mark(agents.core)).child("resumes");
+      if (!keys.length) return row.child(core).child(div().text_color(t.dim).child("no agent here"));
       for (const k of keys) if (!agents[k]) missing.push(`${AGENTS[k]?.name ?? k} on ${name}`);
-      return row.children(keys.map((k) => h_flex().gap(4).items_center().text_color(agents[k] ? t.muted : t.ansi1)
+      return row.child(core).children(keys.map((k) => h_flex().gap(4).items_center().text_color(agents[k] ? t.muted : t.ansi1)
         .child(mark(agents[k])).child(AGENTS[k]?.name ?? k)));
     };
     const rows = places.map(line);
