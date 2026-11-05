@@ -52,7 +52,13 @@ reconnecting.
 
 ## Install
 
-On **every machine whose agents should come back** (this computer, each WSL distro, each
+With a coding agent, paste this to it:
+
+```text
+Install https://github.com/guillaume86/herdr-recover, following its README.
+```
+
+By hand: on **every machine whose agents should come back** (this computer, each WSL distro, each
 server), set up each agent you use there. Each one takes Recover its own way, so its own
 commands update and remove it:
 
@@ -99,6 +105,28 @@ Then, **on the computer that runs the Herdr app only**:
 3. Merge [`keys.json`](keys.json): `ctrl-shift-r` opens the dialog.
 
 Sessions already running are remembered from their next start (or `/resume`).
+
+## Uninstall
+
+With a coding agent, paste this to it:
+
+```text
+Uninstall https://github.com/guillaume86/herdr-recover, following its README.
+```
+
+By hand, on each machine, for the agents you set up there (`sh install.sh --uninstall` does
+all of them):
+
+```sh
+claude plugin uninstall herdr-recover@herdr-recover && claude plugin marketplace remove herdr-recover
+codex plugin remove herdr-recover@herdr-recover && codex plugin marketplace remove herdr-recover
+pi remove git:github.com/guillaume86/herdr-recover
+rm ~/.config/opencode/plugins/herdr-recover.js
+```
+
+On the computer that runs the Herdr app: delete `~/.config/herdr-app/mods/recover`, the
+`recover` block from your layout, and the `mod.open:recover` key from `keys.json`. The
+`recover.*` labels left on terminals do nothing without the mod and go away with them.
 
 ## How it works
 
