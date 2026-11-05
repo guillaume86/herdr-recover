@@ -168,6 +168,19 @@ test("opencode 2: no cli.json while OpenCode 1's settings wait to be moved into 
   } finally { h.done(); }
 });
 
+test("opencode 2: once OpenCode 2 has run, OpenCode 1's leftovers don't hold cli.json back", () => {
+  const h = home({ opencode: "2.0.28" });
+  try {
+    const oc = join(h.dir, "config", "opencode");
+    mkdirSync(oc, { recursive: true });
+    mkdirSync(join(h.dir, "state", "opencode"), { recursive: true });
+    writeFileSync(join(h.dir, "state", "opencode", "kv.json"), '{"skipped_version":"1.0"}\n');
+    writeFileSync(join(oc, "service.json"), "{}\n");
+    h.sh();
+    assert.equal(h.read(join(oc, "cli.json")), '{\n  "plugins": ["./herdr-recover"]\n}\n');
+  } finally { h.done(); }
+});
+
 test("opencode 1: the plugin file, as before", () => {
   const h = home({ opencode: "1.14.2" });
   try {

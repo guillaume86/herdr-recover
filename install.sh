@@ -169,8 +169,8 @@ register_opencode() {
   spec="\"./$name\""
   if [ ! -f "$f" ]; then
     # OpenCode 2 imports OpenCode 1's settings into cli.json on its first start, only while
-    # there is none: don't make one first.
-    if [ -f "$opencode_dir/tui.json" ] || [ -f "$opencode_dir/tui.jsonc" ] || [ -f "$opencode_state/kv.json" ]; then
+    # there is none: don't make one before that start (service.json is OpenCode 2's).
+    if [ ! -f "$opencode_dir/service.json" ] && { [ -f "$opencode_dir/tui.json" ] || [ -f "$opencode_dir/tui.jsonc" ] || [ -f "$opencode_state/kv.json" ]; }; then
       step "  start OpenCode once (it moves its earlier settings into cli.json), then run install.sh again."; return 1
     fi
     printf '{\n  "plugins": [%s]\n}\n' "$spec" >"$f"; return
