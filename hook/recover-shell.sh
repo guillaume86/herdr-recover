@@ -26,7 +26,7 @@ log() { [ -n "${RECOVER_LOG:-}" ] && printf '%s %s: %s\n' "$(date +%T)" "${t:-?}
 # The shell family of a program, as the Recover mod tells them apart.
 shell_kind() {
   b=${1##*/}; b=${b##*\\}; b=${b%.exe}; b=${b%.EXE}
-  case $b in pwsh | powershell | PowerShell) echo pwsh ;; cmd | CMD) echo cmd ;; *) echo posix ;; esac
+  case $b in pwsh | powershell | PowerShell) echo pwsh ;; cmd | CMD) echo cmd ;; fish) echo fish ;; *) echo posix ;; esac
 }
 
 # hc: the one given, the herdr-core that started this shell (its holder) when /proc says so,
@@ -54,8 +54,8 @@ read_record() {
         if (c == "\"") { POS = i + 1; return out }
         if (c == "\\") {
           e = substr(s, i + 1, 1)
-          if (e == "u") { BAD = 1; e = "?"; i += 4 }
-          else if (e == "n") e = "\n"; else if (e == "t") e = "\t"; else if (e == "r") e = "\r"
+          # Any other escape is a control character (\n, \t, \u0001…), never typed into a shell.
+          if (e != "\"" && e != "\\" && e != "/") { BAD = 1; if (e == "u") i += 4; e = "?" }
           out = out e; i += 2; continue
         }
         out = out c; i++
@@ -69,10 +69,17 @@ read_record() {
       while ((k = index(w, "\047")) > 0) { out = out substr(w, 1, k - 1) "\047\\\047\047"; w = substr(w, k + 1) }
       return "\047" out w "\047"
     }
-    function psq(w,    out, k) {
+    # PowerShell takes the curly quotes (U+2018 to U+201B, here in UTF-8) for a quote as well:
+    # every quote is doubled, which makes it a literal.
+    function psq(w,    n, q) {
+      n = split("\047 \342\200\230 \342\200\231 \342\200\232 \342\200\233", Q, " ")
+      for (q = 1; q <= n; q++) w = dbl(w, Q[q])
+      return "\047" w "\047"
+    }
+    function dbl(w, c,    out, k) {
       out = ""
-      while ((k = index(w, "\047")) > 0) { out = out substr(w, 1, k) "\047"; w = substr(w, k + 1) }
-      return "\047" out w "\047"
+      while ((k = index(w, c)) > 0) { out = out substr(w, 1, k - 1 + length(c)) c; w = substr(w, k + length(c)) }
+      return out w
     }
     # Regexes as strings, so no "/" needs escaping: a backslash in a bracket means itself in some
     # awks, and an escape in others.
@@ -132,6 +139,11 @@ read_record() {
         if (dir != "") line = line "set \"" var "=" dir "\" && "
         line = CMDBAD ? "" : line words
       } else if (ok) {
+        # fish reads backslash escapes inside single quotes: a word with a backslash is not written there.
+        if (kind == "fish" && index(cwd dir, "\\")) ok = 0
+        for (x = 1; x <= m; x++) if (kind == "fish" && index(w2[x], "\\")) ok = 0
+      }
+      if (ok && kind != "pwsh" && kind != "cmd") {
         words = dir != "" ? "env " shq(var "=" dir) : ""
         for (x = 1; x <= m; x++) words = words (words != "" ? " " : "") shq(w2[x])
         line = (cwd != "" ? "cd -- " shq(cwd) " && " : "") words
@@ -177,8 +189,27 @@ job() {
   # from one, hc would wrap the line as a note (<hc from=…>) once the terminal ran an agent.
   sleep "${RECOVER_SETTLE:-1.5}"
   unset HC_TERMINAL_ID HC_SCOPE
-  if hc_try send "$t" "$line"; then log "resumed $agent $session: $line"
-  else log "hc send failed for $agent $session"; fi
+  send_claimed "$tpid"
+}
+
+# Types the line, as long as the terminal is still the shell this job claimed ($1): lost again
+# meanwhile, it has another shell, whose own job types the line there; typed twice, the second
+# line would reach the resumed agent as a prompt.
+send_claimed() {
+  i=0
+  while :; do
+    if out=$("$hc" get "$t" --json 2>/dev/null); then
+      tpid= shell= line=
+      eval "$(printf '%s\n' "$out" | read_record "$kind")"
+      [ -n "$tpid" ] || tpid=$me
+      if [ "$tpid" != "$1" ] || [ "$shell" != "$1" ] || [ -z "$line" ]; then
+        log "the terminal moved on (shell $tpid, claimed by ${shell:-none}); nothing typed"; return 0
+      fi
+      "$hc" send "$t" "$line" >/dev/null 2>&1 && { log "resumed $agent $session: $line"; return 0; }
+    fi
+    i=$((i + 1)); [ $i -lt 40 ] || { log "hc send failed for $agent $session"; return 0; }
+    sleep 0.25
+  done
 }
 
 if [ "${1:-}" = --job ]; then
@@ -189,9 +220,13 @@ if [ "${1:-}" = --job ]; then
 fi
 
 [ $# -gt 0 ] || set -- "${SHELL:-/bin/sh}"
-# A shell that isn't there (or this script, given as its own shell) would be a terminal that
-# can't open, retried forever: fall back to sh.
-case $1 in */recover-shell.sh | recover-shell.sh | */herdr-recover-shell | herdr-recover-shell) set -- /bin/sh ;; esac
+# This script given as its own shell (installed twice) runs the shell after it. A shell that
+# isn't there would be a terminal that can't open, retried forever: fall back to sh.
+while :; do
+  case $1 in */recover-shell.sh | recover-shell.sh | */herdr-recover-shell | herdr-recover-shell) shift ;; *) break ;; esac
+done
+[ $# -gt 0 ] || set -- "${SHELL:-/bin/sh}"
+case ${1##*/} in recover-shell.sh | herdr-recover-shell) set -- /bin/sh ;; esac
 command -v "$1" >/dev/null 2>&1 || set -- /bin/sh
 if [ -n "${HC_TERMINAL_ID:-}" ] && find_hc; then
   job "$HC_TERMINAL_ID" $$ "$(shell_kind "$1")" </dev/null >/dev/null 2>&1 &

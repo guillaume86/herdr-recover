@@ -242,8 +242,8 @@ export function shQuote(word) {
   return /^[A-Za-z0-9_@%+=:,./-]+$/.test(s) ? s : `'${s.replace(/'/g, `'\\''`)}'`;
 }
 
-/** One word for PowerShell: a single-quoted literal, apostrophes doubled. */
-export const psQuote = (word) => `'${String(word).replace(/'/g, "''")}'`;
+/** One word for PowerShell: a single-quoted literal, every quote doubled (the curly ones are quotes there too). */
+export const psQuote = (word) => `'${String(word).replace(/['\u2018-\u201b]/g, "$&$&")}'`;
 
 /** One word for cmd.exe: double-quoted when needed. cmd has no escape for `"` inside; refuse those. */
 export function cmdQuote(word) {
@@ -257,6 +257,7 @@ export function shellKind(argv = []) {
   const first = base(argv[0]).toLowerCase();
   if (first === "pwsh" || first === "powershell") return "pwsh";
   if (first === "cmd") return "cmd";
+  if (first === "fish") return "fish";
   return "posix";
 }
 
@@ -275,6 +276,11 @@ export function resumeLine(rec, kind = "posix") {
   const argv = resumeArgv(rec);
   if (!argv) return null;
   const env = rec.dir && AGENTS[rec.agent].dirVar ? [AGENTS[rec.agent].dirVar, rec.dir] : null;
+  const all = [rec.cwd ?? "", rec.dir ?? "", ...argv];
+  // A control character (a newline would press enter) is never typed.
+  if (all.some((w) => /[\u0000-\u001f\u007f]/.test(w))) return null;
+  // fish reads \\ and \' inside single quotes: a word with a backslash can't be written there.
+  if (kind === "fish" && all.some((w) => w.includes("\\"))) return null;
   if (kind === "pwsh") {
     const parts = [];
     if (rec.cwd) parts.push(`Set-Location -LiteralPath ${psQuote(rec.cwd)}`);

@@ -96,45 +96,70 @@ test("herdr-core: a shell over several lines is left alone", () => {
   } finally { h.done(); }
 });
 
-test("herdr-core on Windows: PowerShell starts the job through Git Bash", () => {
-  // On Windows, the real Git Bash. Elsewhere, Git Bash faked: C: is a folder of the test's, and
-  // cygpath maps between the two forms.
-  const dir = mkdtempSync(join(tmpdir(), "recover-install-win-"));
+test("herdr-core: a shell in a table is the table's, not the core's", () => {
+  const h = home();
   try {
-    const bin = join(dir, "bin");
-    const c = join(dir, "c");
-    mkdirSync(bin);
-    const tool = (n, body) => { writeFileSync(join(bin, n), `#!/bin/sh\n${body}\n`); chmodSync(join(bin, n), 0o755); };
-    tool("hc", "exit 0");
-    tool("pwsh.exe", "exit 0");
-    let env, home, appdata, git, hc;
-    if (windows) {
-      home = join(dir, "Jo O'Neil");
-      appdata = join(home, "AppData", "Roaming");
-      env = { PATH: toolPath(bin), HOME: home, APPDATA: appdata };
-      git = gitRoot;
-      hc = mixedPath(join(bin, "hc"));
-    } else {
-      mkdirSync(join(c, "Program Files", "Git", "bin"), { recursive: true });
-      writeFileSync(join(c, "Program Files", "Git", "bin", "sh.exe"), "");
-      tool("uname", "echo MINGW64_NT-10.0");
-      tool("cygpath", `case "$1" in
+    mkdirSync(dirname(h.cfg), { recursive: true });
+    const before = 'notes = false\n\n[templates.reviewer]\nshell = ["zsh"]\n';
+    writeFileSync(h.cfg, before);
+    h.sh();
+    if (hasToml) {
+      const parsed = toml(h.cfg);
+      assert.deepEqual(parsed.shell, [shPath(join(h.dir, ".local", "bin", "herdr-recover-shell"))]);
+      assert.deepEqual(parsed.templates.reviewer.shell, ["zsh"]);
+    }
+    assert.doesNotMatch(h.read(h.cfg), /was:/);
+    h.sh("--uninstall");
+    assert.equal(h.read(h.cfg), before);
+  } finally { h.done(); }
+});
+
+/** A Windows home: on Windows, the real Git Bash; elsewhere, Git Bash faked (C: is a folder of the
+ * test's, and cygpath maps between the two forms). */
+function windowsHome() {
+  const dir = mkdtempSync(join(tmpdir(), "recover-install-win-"));
+  const bin = join(dir, "bin");
+  const c = join(dir, "c");
+  mkdirSync(bin);
+  const tool = (n, body) => { writeFileSync(join(bin, n), `#!/bin/sh\n${body}\n`); chmodSync(join(bin, n), 0o755); };
+  tool("hc", "exit 0");
+  tool("pwsh.exe", "exit 0");
+  let env, home, appdata, git, hc;
+  if (windows) {
+    home = join(dir, "Jo O'Neil");
+    appdata = join(home, "AppData", "Roaming");
+    env = { PATH: toolPath(bin), HOME: home, APPDATA: appdata };
+    git = gitRoot;
+    hc = mixedPath(join(bin, "hc"));
+  } else {
+    mkdirSync(join(c, "Program Files", "Git", "bin"), { recursive: true });
+    writeFileSync(join(c, "Program Files", "Git", "bin", "sh.exe"), "");
+    tool("uname", "echo MINGW64_NT-10.0");
+    tool("cygpath", `case "$1" in
   -u) printf '%s\\n' "$2" | sed 's#\\\\#/#g; s#^C:#${c}#' ;;
   -m) case "$2" in /) echo "C:/Program Files/Git/" ;; ${c}/*) printf '%s\\n' "$2" | sed 's#^${c}#C:#' ;; *) printf 'C:/msys%s\\n' "$2" ;; esac ;;
 esac`);
-      home = join(c, "Users", "Jo O'Neil");
-      appdata = join(home, "AppData", "Roaming");
-      env = { PATH: toolPath(bin), HOME: home, APPDATA: "C:\\Users\\Jo O'Neil\\AppData\\Roaming" };
-      git = "C:/Program Files/Git";
-      hc = `C:/msys${bin}/hc`;
-    }
-    const out = spawnSync(shExe, [installer], { env }).stdout.toString();
+    home = join(c, "Users", "Jo O'Neil");
+    appdata = join(home, "AppData", "Roaming");
+    env = { PATH: toolPath(bin), HOME: home, APPDATA: "C:\\Users\\Jo O'Neil\\AppData\\Roaming" };
+    git = "C:/Program Files/Git";
+    hc = `C:/msys${bin}/hc`;
+  }
+  const cfg = join(appdata, "herdr-core", "config.toml");
+  const sh = (...args) => spawnSync(shExe, [installer, ...args], { env }).stdout.toString();
+  const read = () => (existsSync(cfg) ? readFileSync(cfg, "utf8") : null);
+  return { home, git, hc, cfg, sh, read, done: () => rmSync(dir, { recursive: true, force: true }) };
+}
+
+test("herdr-core on Windows: PowerShell starts the job through Git Bash", () => {
+  const w = windowsHome();
+  try {
+    const out = w.sh();
     assert.match(out, /herdr-core:\n {2}installed/, out);
-    const cfg = join(appdata, "herdr-core", "config.toml");
-    const script = join(home, ".local", "bin", "herdr-recover-shell");
+    const script = join(w.home, ".local", "bin", "herdr-recover-shell");
     assert.ok(existsSync(script));
     if (!hasToml) return;
-    const [exe, ...args] = toml(cfg).shell;
+    const [exe, ...args] = toml(w.cfg).shell;
     assert.equal(exe, "pwsh.exe");
     // hc's own entry (pwsh.exe -NoExit -Command <its prompt>), which keeps the terminal's folder
     // known to hc, then the job; `cygpath -m /`'s trailing slash doesn't double the one after it.
@@ -143,9 +168,27 @@ esac`);
     const quoted = (p) => p.replaceAll("'", "''");
     const scriptWin = windows ? mixedPath(script) : "C:/Users/Jo O'Neil/.local/bin/herdr-recover-shell";
     assert.equal(args[2], HC_PROMPT + "; " +
-      `if ($env:HC_TERMINAL_ID) { try { Start-Process -WindowStyle Hidden -FilePath '${quoted(git)}/bin/sh.exe' ` +
-      `-ArgumentList ('"${quoted(scriptWin)}" --job {0} {1} pwsh "${quoted(hc)}"' -f $env:HC_TERMINAL_ID, $PID) } catch {} }`);
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+      `if ($env:HC_TERMINAL_ID) { try { Start-Process -WindowStyle Hidden -FilePath '${quoted(w.git)}/bin/sh.exe' ` +
+      `-ArgumentList ('"${quoted(scriptWin)}" --job {0} {1} pwsh "${quoted(w.hc)}"' -f $env:HC_TERMINAL_ID, $PID) } catch {} }`);
+  } finally { w.done(); }
+});
+
+test("herdr-core on Windows: a PowerShell of yours is kept and given back; one with arguments is left alone", () => {
+  const w = windowsHome();
+  try {
+    mkdirSync(dirname(w.cfg), { recursive: true });
+    // A literal string, which a basic one would read differently.
+    const mine = "shell = ['C:\\Program Files\\PowerShell\\7\\pwsh.exe']\nnotes = false\n";
+    writeFileSync(w.cfg, mine);
+    assert.match(w.sh(), /installed/);
+    if (hasToml) assert.equal(toml(w.cfg).shell[0], "C:\\Program Files\\PowerShell\\7\\pwsh.exe");
+    w.sh("--uninstall");
+    assert.equal(w.read(), mine);
+    const withArgs = 'shell = ["pwsh.exe", "-NoLogo"]\n';
+    writeFileSync(w.cfg, withArgs);
+    assert.match(w.sh(), /skipped: .* runs pwsh.exe with arguments/);
+    assert.equal(w.read(), withArgs);
+  } finally { w.done(); }
 });
 
 test("opencode 2: the TUI plugin is listed in cli.json, OpenCode 1's file removed", () => {
@@ -224,11 +267,16 @@ test("opencode: a config folder with only another tool's plugin isn't OpenCode",
   } finally { h.done(); }
 });
 
-test("opencode 1: the plugin file, as before", () => {
+test("opencode 1: not supported, and an earlier Recover's plugin file is taken out", () => {
   const h = home({ opencode: "1.14.2" });
   try {
-    h.sh();
-    assert.ok(existsSync(join(h.dir, "config", "opencode", "plugins", "herdr-recover.js")));
+    const plugins = join(h.dir, "config", "opencode", "plugins");
+    mkdirSync(plugins, { recursive: true });
+    writeFileSync(join(plugins, "herdr-recover.js"), "// v1\n");
+    assert.match(h.sh(), /OpenCode:\n {2}skipped: Recover needs OpenCode 2/);
+    assert.ok(!existsSync(join(plugins, "herdr-recover.js")));
     assert.ok(!existsSync(join(h.dir, "config", "opencode", "cli.json")));
+    assert.ok(!existsSync(join(h.dir, "config", "opencode", "herdr-recover")));
+    assert.match(h.sh("--doctor"), /OpenCode: version 1, not supported/);
   } finally { h.done(); }
 });

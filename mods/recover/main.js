@@ -90,13 +90,13 @@ async function winCommandLine(pid) {
 
 // Which agents a machine has, and whether Recover is set up for each: `agent=1` or `agent=0`
 // lines, one per agent whose config folder exists. Claude Code's plugin (or an older install's
-// hook) shows in its settings, Codex's in its config, Pi's package in its settings, and the
-// OpenCode plugin is a file.
+// hook) shows in its settings, Codex's in its config, Pi's package in its settings, and
+// OpenCode 2's plugin is a folder listed in its cli.json.
 const INTEGRATIONS = `
 has() { grep -qs ${HOOK_MARK} "$@" && echo 1 || echo 0; }
 d=\${CLAUDE_CONFIG_DIR:-$HOME/.claude}; [ -d "$d" ] && echo "claude=$(has "$d/settings.json")"
 d=\${CODEX_HOME:-$HOME/.codex}; [ -d "$d" ] && echo "codex=$(has "$d/config.toml" "$d/hooks.json")"
-d=\${OPENCODE_CONFIG_DIR:-\${XDG_CONFIG_HOME:-$HOME/.config}/opencode}; [ -d "$d" ] && echo "opencode=$([ -f "$d/plugins/${HOOK_MARK}.js" ] && echo 1 || echo 0)"
+d=\${OPENCODE_CONFIG_DIR:-\${XDG_CONFIG_HOME:-$HOME/.config}/opencode}; [ -d "$d" ] && echo "opencode=$([ -f "$d/${HOOK_MARK}/tui.js" ] && grep -qsF '"./${HOOK_MARK}"' "$d/cli.json" && echo 1 || echo 0)"
 d=\${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}; [ -d "$d" ] && echo "pi=$(has "$d/settings.json")"
 echo "core=$(has "\${XDG_CONFIG_HOME:-$HOME/.config}/herdr-core/config.toml" "\${APPDATA:-/nonexistent}/herdr-core/config.toml")"
 true`;

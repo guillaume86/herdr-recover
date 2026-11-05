@@ -20,8 +20,8 @@
 #     Codex        a plugin:   codex plugin marketplace add guillaume86/herdr-recover
 #                              codex plugin add herdr-recover@herdr-recover
 #     Pi           a package:  pi install git:github.com/guillaume86/herdr-recover
-#     OpenCode     a TUI plugin, copied to ~/.config/opencode/herdr-recover/tui.js and listed
-#                  in cli.json (OpenCode 1: a plugin file in ~/.config/opencode/plugins)
+#     OpenCode 2   a TUI plugin, copied to ~/.config/opencode/herdr-recover/tui.js and listed
+#                  in cli.json (OpenCode 1 isn't supported)
 #
 # RECOVER_SOURCE=<folder> installs from a local clone instead of GitHub (development).
 
@@ -62,6 +62,32 @@ hc_prompt='$global:__hc_prompt = $function:prompt; function global:prompt { $p =
 ps_literal() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/''/g")"; }
 ps_format() { printf '%s' "$1" | sed "s/'/''/g; s/{/{{/g; s/}/}}/g"; }
 
+# The words of a TOML array's inside, one per line ("…" strings with \\ and \", '…' strings), or
+# a failure when it holds anything else.
+toml_words() {
+  printf '%s\n' "$1" | awk '{ s = s $0 } END {
+    n = 0; i = 1; L = length(s)
+    while (1) {
+      while (i <= L && substr(s, i, 1) ~ /[ \t\r]/) i++
+      if (i > L) break
+      q = substr(s, i, 1); w = ""; i++
+      if (q == "\047") { k = index(substr(s, i), "\047"); if (!k) exit 1; w = substr(s, i, k - 1); i += k }
+      else if (q == "\"") {
+        while (i <= L && (c = substr(s, i, 1)) != "\"") {
+          if (c == "\\") { c = substr(s, i + 1, 1); if (c != "\\" && c != "\"") exit 1; i++ }
+          w = w c; i++
+        }
+        if (i > L) exit 1
+        i++
+      } else exit 1
+      W[++n] = w
+      while (i <= L && substr(s, i, 1) ~ /[ \t\r]/) i++
+      if (i <= L) { if (substr(s, i, 1) != ",") exit 1; i++ }
+    }
+    for (k = 1; k <= n; k++) print W[k]
+  }'
+}
+
 # The `shell` line: recover-shell.sh in front of the shell there was (Linux, macOS), or
 # PowerShell starting its job through Git Bash (Windows). $1 = the `shell = […]` there was.
 core_line() {
@@ -72,12 +98,17 @@ core_line() {
     printf 'shell = [%s%s]' "$(toml "$script")" "${inner:+, $(printf '%s' "$inner" | sed 's/^[[:space:]]*//')}"
     return 0
   fi
-  first=$(printf '%s' "$inner" | sed -n 's/^[[:space:]]*"\([^"]*\)".*/\1/p')
+  words=$(toml_words "$inner") \
+    || { step "  skipped: Recover can't read the \`shell\` in $(core_config); write it as [\"pwsh.exe\"] (or take it out) and run install.sh again."; return 1; }
+  first=$(printf '%s\n' "$words" | head -1)
   if [ -n "$first" ]; then
     case $(printf '%s' "${first##*[\\/]}" | tr 'A-Z' 'a-z') in
       pwsh | pwsh.exe | powershell | powershell.exe) exe=$first ;;
       *) step "  skipped: $(core_config) runs $first; Recover on Windows starts its job from PowerShell."; return 1 ;;
     esac
+    # Recover's entry is PowerShell with hc's own -Command: arguments of yours would be lost.
+    [ "$(printf '%s\n' "$words" | wc -l)" -eq 1 ] \
+      || { step "  skipped: $(core_config) runs $first with arguments, which Recover's entry would drop; take them out and run install.sh again."; return 1; }
   elif has pwsh.exe; then exe=pwsh.exe
   else exe=powershell.exe; fi
   # `cygpath -m /` ends in a slash.
@@ -105,14 +136,15 @@ write_core() {
     elif [ -n "$3" ]; then
       printf '%s\n' "$3"
     fi
-    if [ -f "$1" ]; then awk -v m="$mark" 'index($0, m) == 0 && $0 !~ /^[[:space:]]*shell[[:space:]]*=/' "$1"; fi
+    # The top-level `shell` only: a table (after a [header]) keeps its own keys.
+    if [ -f "$1" ]; then awk -v m="$mark" '/^[[:space:]]*\[/ { table = 1 } index($0, m) == 0 && (table || $0 !~ /^[[:space:]]*shell[[:space:]]*=/)' "$1"; fi
   } >"$tmp" && mv -f "$tmp" "$1" || { rm -f "$tmp"; return 1; }
   [ -s "$1" ] || rm -f "$1"
 }
 
 # The `shell` line that isn't ours, now or kept from before ours.
 core_was() {
-  now=$(grep -E '^[[:space:]]*shell[[:space:]]*=' "$1" 2>/dev/null | grep -vF "$mark" | head -1)
+  now=$(awk -v m="$mark" '/^[[:space:]]*\[/ { exit } /^[[:space:]]*shell[[:space:]]*=/ && index($0, m) == 0 { print; exit }' "$1" 2>/dev/null)
   if [ -n "$now" ]; then printf '%s' "$now"; else sed -n "s/^$mark was: //p" "$1" 2>/dev/null | head -1; fi
 }
 
@@ -134,7 +166,10 @@ uninstall_core() {
   cfg=$(core_config)
   if grep -qsF "$mark" "$cfg"; then
     step "herdr-core:"
-    write_core "$cfg" "" "$(sed -n "s/^$mark was: //p" "$cfg" | head -1)" && step "  removed Recover's shell from $cfg"
+    # Not written, the config still runs the script: keep it, or new terminals can't open.
+    write_core "$cfg" "" "$(sed -n "s/^$mark was: //p" "$cfg" | head -1)" \
+      || { step "  failed to write $cfg: Recover's shell is still set there"; return 0; }
+    step "  removed Recover's shell from $cfg"
   fi
   # After the config: a configured shell that is missing is a terminal that can't open.
   rm -f "$shell_bin"
@@ -220,18 +255,14 @@ unregister_opencode() {
 install_opencode() {
   opencode_here || return 0
   step "OpenCode:"
-  if [ "$(opencode_major)" -ge 2 ]; then
-    # OpenCode 1's plugin file would load in OpenCode 2's shared background service, which has
-    # the environment of whichever terminal started it, and label that terminal.
-    rm -f "$opencode_dir/plugins/$name.js"
-    mkdir -p "$opencode_dir/$name" && cp "$here/opencode/tui.js" "$opencode_dir/$name/tui.js" \
-      || { step "  failed to copy the plugin to $opencode_dir/$name"; return 0; }
-    register_opencode && step "  installed: $opencode_dir/$name/tui.js, listed in $opencode_dir/cli.json (run install.sh again to update it)"
-  else
-    mkdir -p "$opencode_dir/plugins" && cp "$here/opencode/$name.js" "$opencode_dir/plugins/$name.js" \
-      && step "  installed: $opencode_dir/plugins/$name.js (run install.sh again to update it)" \
-      || step "  failed to copy the plugin to $opencode_dir/plugins"
-  fi
+  # The plugin file of an earlier Recover (for OpenCode 1): under OpenCode 2 it would load in the
+  # shared background service, which has the environment of whichever terminal started it, and
+  # label that terminal.
+  rm -f "$opencode_dir/plugins/$name.js"
+  if [ "$(opencode_major)" -lt 2 ]; then step "  skipped: Recover needs OpenCode 2."; return 0; fi
+  mkdir -p "$opencode_dir/$name" && cp "$here/opencode/tui.js" "$opencode_dir/$name/tui.js" \
+    || { step "  failed to copy the plugin to $opencode_dir/$name"; return 0; }
+  register_opencode && step "  installed: $opencode_dir/$name/tui.js, listed in $opencode_dir/cli.json (run install.sh again to update it)"
 }
 
 install_pi() {
@@ -257,10 +288,8 @@ doctor() {
     if [ "$(opencode_major)" -ge 2 ]; then
       if [ -f "$opencode_dir/$name/tui.js" ] && grep -qsF "\"./$name\"" "$opencode_dir/cli.json"; then step "OpenCode: TUI plugin installed"
       else step "OpenCode: not set up"; fi
-      [ -f "$opencode_dir/plugins/$name.js" ] && step "  (and OpenCode 1's plugin file, which OpenCode 2 runs in the wrong place: run install.sh again)"
-    else
-      [ -f "$opencode_dir/plugins/$name.js" ] && step "OpenCode: plugin installed" || step "OpenCode: not set up"
-    fi
+    else step "OpenCode: version 1, not supported (Recover needs OpenCode 2)"; fi
+    [ -f "$opencode_dir/plugins/$name.js" ] && step "  (and the plugin file of an earlier Recover, which runs in the wrong place: run install.sh again)"
   fi
   has pi && { grep -qs "$name" "$pi_dir/settings.json" && step "Pi: package installed" || step "Pi: not set up"; }
   return 0

@@ -12,6 +12,8 @@ import { readRecord, resumeLine } from "../mods/recover/lib/core.js";
 const here = dirname(fileURLToPath(import.meta.url));
 const script = join(here, "..", "hook", "recover-shell.sh");
 const ID = "873d75aa-1a3e-4bc5-9340-0efc1adfb1af";
+// The curly single quotes, which PowerShell takes for quotes: ‘ ’ ‚ ‛
+const [LSQ, RSQ, SLQ, HRQ] = [0x2018, 0x2019, 0x201a, 0x201b].map((c) => String.fromCodePoint(c));
 
 // The awks this machine has: the script must work with whichever one the shell finds.
 const awks = ["awk", "mawk", "gawk", "busybox awk", "original-awk"].filter((a) => spawnSync("sh", ["-c", `command -v ${a.split(" ")[0]}`]).status === 0);
@@ -50,10 +52,14 @@ const cases = [
   ["a session id too long", { "recover.agent": "claude", "recover.session": "a".repeat(129), "recover.cwd": "/x" }],
   ["another label with an escape", { "recover.agent": "claude", "recover.session": ID, "recover.cwd": "/x", "herdr.title": "bell\u0007" }],
   ["no record", { "herdr.space": "sp1", where: "~ / 1" }],
+  // PowerShell's quotes include the curly ones: undoubled, the rest of the folder would be code.
+  ["curly quotes in the folder", { "recover.agent": "claude", "recover.session": ID, "recover.cwd": `C:\\x\\it${RSQ}s; Write-Output INJECTED; ${RSQ} ${LSQ}a${LSQ} ${SLQ}${HRQ}'${RSQ}`, "recover.flags": "[]" }],
+  ["a newline in the folder", { "recover.agent": "claude", "recover.session": ID, "recover.cwd": "/x\ny", "recover.flags": "[]" }],
+  ["a tab in a flag", { "recover.agent": "claude", "recover.session": ID, "recover.cwd": "/x", "recover.flags": JSON.stringify(["--add-dir", "a\tb"]) }],
 ];
 
 for (const awk of awks) {
-  for (const kind of ["posix", "pwsh", "cmd"]) {
+  for (const kind of ["posix", "pwsh", "cmd", "fish"]) {
     test(`${awk}: ${kind} resume lines match the mod's`, () => {
       for (const [name, labels] of cases) {
         const got = readWith(awk, terminal(labels), kind);
@@ -82,19 +88,51 @@ test("posix lines come back as the same words in sh", () => {
   }
 });
 
+const pwsh = spawnSync("pwsh", ["-NoProfile", "-Command", "exit 0"]).status === 0;
+
+test("pwsh lines come back as the same words in PowerShell", { skip: !pwsh && "no pwsh here" }, () => {
+  for (const [name, labels] of cases) {
+    const { line } = readWith("awk", terminal(labels), "pwsh");
+    if (!line) continue;
+    const rec = readRecord(labels);
+    // Set-Location and the agent replaced by printers of their arguments (a function comes
+    // before a cmdlet); anything else the line ran would print too.
+    const code = "[Console]::OutputEncoding = [Text.Encoding]::UTF8; " +
+      "function Set-Location { param([string]$LiteralPath) Write-Output \"[cd $LiteralPath]\" }; " +
+      ["claude", "codex", "opencode", "pi"].map((a) => `function ${a} { Write-Output '[${a}]'; foreach ($w in $args) { Write-Output "[$w]" } }`).join("; ") +
+      "; " + line;
+    const r = spawnSync("pwsh", ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(code, "utf16le").toString("base64")]);
+    const argv = { claude: ["claude", ...rec.flags, "--resume", rec.session], codex: ["codex", "resume", ...rec.flags, rec.session],
+      opencode: ["opencode", ...rec.flags, "--session", rec.session], pi: ["pi", ...rec.flags, "--session", rec.session] }[rec.agent];
+    const want = [...(rec.cwd ? [`[cd ${rec.cwd}]`] : []), ...argv.map((w) => `[${w}]`)];
+    assert.deepEqual(r.stdout.toString("utf8").split(/\r?\n/).filter(Boolean), want, `${name}\n${r.stderr}`);
+  }
+});
+
 // The job, against a fake hc that logs its calls and can fail its first `get`s, as hc does
 // while the core restarts the terminal.
-function runJob(labels, { pid = 4242, me = 4242, kind = "posix", failGets = 0 } = {}) {
+function runJob(labels, { pid = 4242, me = 4242, kind = "posix", failGets = 0, lostAfterClaim = false } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "recover-shell-"));
   try {
     writeFileSync(join(dir, "get.json"), terminal(labels, pid));
     writeFileSync(join(dir, "fails"), String(failGets));
+    // The claim lands on the record, as hc does; lostAfterClaim: the shell is lost again right
+    // after it (another pid).
+    writeFileSync(join(dir, "apply.cjs"), `const fs = require("fs"), [f, v] = process.argv.slice(2);
+const t = JSON.parse(fs.readFileSync(f, "utf8"));
+t.labels["recover.shell"] = v;
+if (${lostAfterClaim}) t.pid = 9999;
+fs.writeFileSync(f, JSON.stringify(t));
+`);
     const hc = join(dir, "hc");
     writeFileSync(hc, `#!/bin/sh
 printf '%s\\n' "$*" >> "${dir}/calls"
 if [ "$1" = get ]; then
   n=$(cat "${dir}/fails"); if [ "$n" -gt 0 ]; then echo $((n - 1)) > "${dir}/fails"; echo '{"error":{"kind":"unavailable"}}'; exit 1; fi
   cat "${dir}/get.json"
+fi
+if [ "$1" = label ]; then
+  for a in "$@"; do case $a in recover.shell=*) node "${dir}/apply.cjs" "${dir}/get.json" "\${a#recover.shell=}" ;; esac; done
 fi
 `);
     chmodSync(hc, 0o755);
@@ -112,13 +150,23 @@ test("job: a lost session is claimed, then typed", () => {
   const { calls } = runJob(record);
   assert.equal(calls[0], "get t3 --json");
   assert.match(calls[1], /^label t3 recover\.shell=4242 recover\.resumed=\d+000 recover\.failed=$/);
-  assert.equal(calls[2], `send t3 cd -- /w && claude --model opus --resume ${ID}`);
-  assert.equal(calls.length, 3);
+  // Checked again just before typing: still this shell, still claimed by this job.
+  assert.equal(calls[2], "get t3 --json");
+  assert.equal(calls[3], `send t3 cd -- /w && claude --model opus --resume ${ID}`);
+  assert.equal(calls.length, 4);
+});
+
+test("job: a shell lost again before the line is typed gets nothing (its successor's job types it)", () => {
+  const { calls, log } = runJob(record, { lostAfterClaim: true });
+  assert.match(calls[1], /^label t3 recover\.shell=4242 /);
+  assert.ok(!calls.some((c) => c.startsWith("send")), calls.join("\n"));
+  assert.match(log, /moved on/);
 });
 
 test("job: it waits out a terminal the core is still restarting", () => {
   const { calls } = runJob(record, { failGets: 3 });
-  assert.equal(calls.filter((c) => c.startsWith("get")).length, 4);
+  // Three answered "unavailable", then the read, then the check before typing.
+  assert.equal(calls.filter((c) => c.startsWith("get")).length, 5);
   assert.match(calls.at(-1), /^send t3 /);
 });
 

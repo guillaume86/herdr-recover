@@ -16,7 +16,7 @@
 // or a SIGKILL leaves it to be resumed.
 //
 // It never gets in OpenCode's way: outside a herdr terminal it does nothing, and a failing `hc`
-// is ignored. OpenCode 1 uses opencode/herdr-recover.js instead.
+// is ignored. OpenCode 1 isn't supported.
 
 import { execFile, execFileSync } from "node:child_process";
 
