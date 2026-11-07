@@ -14,9 +14,9 @@
 // Resume, Auto and Forget. Either copy keeps the list while it is up, so the
 // dialog works even without the block in the layout.
 
-import { View, div } from "gpui-kit";
+import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { hc, exec, run, theme, terminals, focused, home, props, closeOverlay, notify, shared, setShared, window as appWindow, readTextFile, machines } from "herdr";
+import { hc, exec, run, theme, terminals, focused, home, props, closeOverlay, notify, shared, setShared, window as appWindow, readTextFile, machines, settings } from "herdr";
 import {
   AGENTS, PREFIX, agentOf, agentForApp, carriedFlags, readRecord, labelArgs, clearArgs, stateOf, decide, resumeLine, shellKind,
   isWindowsShell, parseTasklist,
@@ -31,6 +31,8 @@ const HOOK_MARK = "herdr-recover";
 const MAX_SHARE = 0.85;
 const CHROME_H = 130;
 const NOTE_H = 56;
+// The bar's side padding: 8 a side, so the item sits 16 px from its neighbours like a native one.
+const PAD = 8;
 
 const STATE = {
   running: { word: "Running", color: (t) => t.ansi2 },
@@ -301,6 +303,7 @@ function badge(t, state) {
 export default class Recover extends View {
   init(_props, cx) {
     this.dialog = Boolean(props()?.overlay);
+    this.fitted = 0;
     this.note = null;
     this.busy = false;
     this.focus = this.dialog ? focused()?.terminal ?? null : null;
@@ -324,6 +327,18 @@ export default class Recover extends View {
 
   // ── the status-bar block ──
 
+  /** The block takes its content's width (measured zoomed; the layout is at zoom 1). `fit: false` keeps it. */
+  fit(width) {
+    if (props()?.fit === false) return;
+    const px = Math.ceil(width / (Number(settings()?.zoom) || 1)) + 2 * PAD;
+    if (px === this.fitted) return;
+    this.fitted = px;
+    run("layout.resize", { id: String(props()?.block ?? "recover"), px });
+  }
+
+  // Styled like the native status items: a history icon, 13 px, the counts on hover. Dim with
+  // nothing on record, muted with sessions remembered, and the theme's warning colors with a
+  // count beside the icon when a restart took sessions a resume didn't bring back.
   renderBar() {
     const t = theme();
     const m = mem();
@@ -331,19 +346,23 @@ export default class Recover extends View {
     const needs = m.entries.filter((e) => e.state === "lost" || e.state === "failed");
     const running = m.entries.filter((e) => e.state === "running");
     const edge = props()?.border;
+    const count = needs.length
+      ? `${needs.length} to recover · ${running.length} running`
+      : m.entries.length ? `${m.entries.length} remembered` : "No agent session on record";
     const tip = m.entries.length
-      ? m.entries.map((e) => `${e.where ?? e.address}: ${STATE[e.state]?.word ?? e.state}`).join("\n")
-      : "No agent session on record. Recover remembers them as they start.";
-    const color = needs.some((e) => e.state === "failed") ? t.ansi1 : needs.length ? t.ansi3 : t.dim;
-    return h_flex().id("recover-bar").size_full().px(12).gap(6).items_center().bg(t.chrome).text_size(11.8).cursor_pointer()
+      ? [count, ...m.entries.map((e) => `${e.where ?? e.address}: ${STATE[e.state]?.word ?? e.state}`)].join("\n")
+      : `${count}. Recover remembers them as they start.`;
+    const color = needs.some((e) => e.state === "failed") ? t.ansi1 : needs.length ? t.ansi3 : m.entries.length ? t.muted : t.dim;
+    return h_flex().id("recover-bar").size_full().px(PAD).items_center().bg(t.chrome).text_size(11.8).cursor_pointer()
       .when(edge === "top", (el) => el.border_t(1).border_color(t.border))
       .when(edge === "bottom", (el) => el.border_b(1).border_color(t.border))
       .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
       .on_click(() => run("mod.open", { name: "recover" }))
       .tooltip(tip)
-      .child(div().text_color(color).child("↻"))
-      .when(needs.length > 0, (el) => el.child(div().text_color(color).child(`${needs.length} to recover`)))
-      .when(!needs.length && running.length > 0, (el) => el.child(div().text_color(t.dim).child(`${running.length} remembered`)));
+      .child(h_flex().id("content").flex_none().gap(6).items_center()
+        .on_size_change((size) => this.fit(size.width))
+        .child(svg("mods/recover/history.svg").size(13).flex_none().text_color(color))
+        .when(needs.length > 0, (el) => el.child(div().text_color(color).child(String(needs.length)))));
   }
 
   // ── the dialog ──
