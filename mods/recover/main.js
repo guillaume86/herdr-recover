@@ -336,9 +336,9 @@ export default class Recover extends View {
     run("layout.resize", { id: String(props()?.block ?? "recover"), px });
   }
 
-  // Styled like the native status items: a history icon, 13 px, the counts on hover. Dim with
-  // nothing on record, muted with sessions remembered, and the theme's warning colors with a
-  // count beside the icon when a restart took sessions a resume didn't bring back.
+  // Styled like the native status items: a history icon, 13 px, in their muted grey, the counts
+  // on hover; dim and faded with nothing on record. The theme's warning colors and a count beside the icon
+  // when a restart took sessions a resume didn't bring back.
   renderBar() {
     const t = theme();
     const m = mem();
@@ -361,7 +361,7 @@ export default class Recover extends View {
       .tooltip(tip)
       .child(h_flex().id("content").flex_none().gap(6).items_center()
         .on_size_change((size) => this.fit(size.width))
-        .child(svg("mods/recover/history.svg").size(13).flex_none().text_color(color))
+        .child(svg("mods/recover/history.svg").size(13).flex_none().text_color(color).opacity(m.entries.length ? 1 : 0.6))
         .when(needs.length > 0, (el) => el.child(div().text_color(color).child(String(needs.length)))));
   }
 
