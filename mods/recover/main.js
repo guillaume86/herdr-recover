@@ -31,8 +31,12 @@ const HOOK_MARK = "herdr-recover";
 const MAX_SHARE = 0.85;
 const CHROME_H = 130;
 const NOTE_H = 56;
-// The bar's side padding: 8 a side, so the item sits 16 px from its neighbours like a native one.
-const PAD = 8;
+// The bar item's content sits in a pill (PILL_X a side) that lights up on hover and stays pressed
+// while the dialog is open, like the tab bar's Files / Changes buttons. PAD + PILL_X = 8 keeps the
+// icon 16 px from its neighbours; PILL_H 21 in a 30 px bar sits on whole pixels at 100, 110, 120 %.
+const PAD = 2, PILL_X = 6, PILL_H = 21;
+// Whether the dialog is open, for the bar's pressed look.
+const DIALOG_OPEN = "recover.dialog-open";
 
 const STATE = {
   running: { word: "Running", color: (t) => t.ansi2 },
@@ -303,6 +307,9 @@ function badge(t, state) {
 export default class Recover extends View {
   init(_props, cx) {
     this.dialog = Boolean(props()?.overlay);
+    if (this.dialog) setShared(DIALOG_OPEN, true);
+    // A dialog never outlives the app: a flag left on by a crash is cleared when the bar starts.
+    else if (shared(DIALOG_OPEN)) setShared(DIALOG_OPEN, false);
     this.fitted = 0;
     this.note = null;
     this.busy = false;
@@ -346,6 +353,7 @@ export default class Recover extends View {
     const needs = m.entries.filter((e) => e.state === "lost" || e.state === "failed");
     const running = m.entries.filter((e) => e.state === "running");
     const edge = props()?.border;
+    const open = Boolean(shared(DIALOG_OPEN));
     const count = needs.length
       ? `${needs.length} to recover · ${running.length} running`
       : m.entries.length ? `${m.entries.length} remembered` : "No agent session on record";
@@ -359,15 +367,21 @@ export default class Recover extends View {
       .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
       .on_click(() => run("mod.open", { name: "recover" }))
       .tooltip(tip)
-      .child(h_flex().id("content").flex_none().gap(6).items_center()
+      .child(h_flex().id("content").flex_none().h(PILL_H).px(PILL_X).rounded(6).gap(6).items_center()
+        .when(open, (el) => el.bg(t.selected))
+        .hover((s) => s.bg(t.hover))
         .on_size_change((size) => this.fit(size.width))
-        .child(svg("mods/recover/history.svg").size(13).flex_none().text_color(color).opacity(m.entries.length ? 1 : 0.6))
+        .child(svg("mods/recover/history.svg").size(13).flex_none().text_color(open && color === t.muted ? t.foreground : color).opacity(m.entries.length ? 1 : 0.6))
         .when(needs.length > 0, (el) => el.child(div().text_color(color).child(String(needs.length)))));
   }
 
   // ── the dialog ──
 
-  close() { closeOverlay(props().overlay); }
+  close() {
+    if (!this.dialog) return;
+    setShared(DIALOG_OPEN, false);
+    closeOverlay(props().overlay);
+  }
 
   entries() { return mem().entries; }
   current() { return this.entries().find((e) => e.address === this.focus) ?? null; }
