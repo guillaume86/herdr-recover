@@ -107,9 +107,9 @@ Sessions already running are remembered from their next start (or `/resume`).
 
 The `recover` mod shows the remembered sessions of every terminal the app sees, on every
 machine: which run, which a restart took, which a resume didn't bring back, and which died
-under a shell that lived on (nothing resumes those by itself). Its dialog offers Resume,
-Forget and an Auto toggle per terminal, and shows what is set up on each machine. On the
-computer that runs the Herdr app:
+under a shell that lived on (nothing resumes those by itself). Its popup, opened from the
+status bar, lists them by machine with Resume, Forget and an auto-resume switch per terminal,
+and shows what is set up on each machine. On the computer that runs the Herdr app:
 
 1. Copy `mods/recover` to `~/.config/herdr-app/mods/recover` and run
    `herdr-app check ~/.config/herdr-app/mods/recover`.
@@ -120,7 +120,9 @@ computer that runs the Herdr app:
    { "id": "recover", "type": "block", "size": { "px": 120 }, "content": { "mod": "recover" } }
    ```
 
-3. Merge [`keys.json`](keys.json): `ctrl-shift-r` opens the dialog.
+3. Optional: no key is bound by default. The `recover.toggle` command opens or closes the
+   popup; to bind it, add it to `~/.config/herdr-app/keys.json`, for example
+   `"global": { "ctrl-shift-r": "recover.toggle" }`.
 
 ## Uninstall
 
@@ -141,7 +143,7 @@ rm -r ~/.config/opencode/herdr-recover   # and "./herdr-recover" from cli.json's
 ```
 
 On the computer that runs the Herdr app: delete `~/.config/herdr-app/mods/recover`, the
-`recover` block from your layout, and the `mod.open:recover` key from `keys.json`. The
+`recover` block from your layout, and any `recover.toggle` key you bound in `keys.json`. The
 `recover.*` labels left on terminals do nothing and go away with them.
 
 ## How it works
